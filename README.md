@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/appreply-co-mcp-appstore-badge.png)](https://mseep.ai/app/appreply-co-mcp-appstore)
+
 # App Store Scraper MCP Server
 
 This is an MCP (Model Context Protocol) server that provides tools for searching and analyzing apps from both the Google Play Store and Apple App Store. 
