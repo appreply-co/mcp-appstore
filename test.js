@@ -20,7 +20,7 @@ import { Client } from './node_modules/@modelcontextprotocol/sdk/dist/esm/client
 import { StdioClientTransport } from './node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js';
 
 // Test timeout value (in ms)
-const TEST_TIMEOUT = 60000; // Increased to 60s for cross-platform testing
+const TEST_TIMEOUT = 180000; // 3m — live store APIs can be slow across many tool tests
 
 // Test app IDs
 const ANDROID_APP_ID = 'com.spotify.music';

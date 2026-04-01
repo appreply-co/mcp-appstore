@@ -1,5 +1,6 @@
-# Node.js dependencies
+# Node.js dependencies (do not commit; run `npm install` locally)
 node_modules/
+**/node_modules/
 
 # Logs
 logs
