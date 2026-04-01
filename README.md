@@ -25,18 +25,22 @@ npm start
 
 This will start the server in studio mode, which is compatible with MCP clients.
 
-The launch command is
+**Claude Code:** Add to `.mcp.json` or your MCP config (path must be absolute; on Windows you can use forward slashes):
 
-```bash
+```json
 {
   "mcpServers": {
     "mcp-appstore": {
-      "command": "node /destination/server.js",
-      "cwd": "/destination"
+      "command": "node",
+      "args": ["/absolute/path/to/mcp-appstore/server.js"]
     }
   }
 }
 ```
+
+Or: `claude mcp add --transport stdio mcp-appstore -- node /absolute/path/to/mcp-appstore/server.js`
+
+**Claude Desktop:** Same `mcpServers` entry in `claude_desktop_config.json` (see Claude’s docs for the file path on your OS).
 
 ## Available Tools
 
