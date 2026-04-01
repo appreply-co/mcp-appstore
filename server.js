@@ -21,6 +21,8 @@
 import { z } from "zod";
 import gplay from "google-play-scraper";
 import appStore from "app-store-scraper";
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import aso from 'aso';
@@ -40,6 +42,10 @@ const memoizedAppStore = appStore.memoized({
 const gplayASO = aso('gplay');
 const itunesASO = aso('itunes');
 
+/**
+ * Build a fresh MCP server instance (stdio or one HTTP request/session).
+ */
+export function createMcpAppStoreServer() {
 // Create an MCP server with detailed configuration
 const server = new McpServer({
   name: "AppStore Scraper",
@@ -1772,6 +1778,9 @@ server.tool(
   }
 );
 
+return server;
+}
+
 // Helper functions for keyword score interpretation
 function interpretDifficultyScore(score) {
   if (score < 3) return "Very easy to rank for";
@@ -1815,9 +1824,10 @@ function determineMonetizationModel(pricingDetails) {
   }
 }
 
-// Start the server
+// Start the server (stdio) when this file is the entrypoint
 async function main() {
   try {
+    const server = createMcpAppStoreServer();
     const transport = new StdioServerTransport();
     console.error("Starting App Store Scraper MCP server...");
     await server.connect(transport);
@@ -1827,4 +1837,10 @@ async function main() {
   }
 }
 
-main(); 
+const isMainModule =
+  process.argv[1] &&
+  path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]);
+
+if (isMainModule) {
+  main();
+} 

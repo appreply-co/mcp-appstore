@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "start:http": "node server-http.js",
+    "test:http": "node server-http.run-test.js",
     "test": "node test.js",
     "platform-test": "node platform-test.js",
     "find-ios-reviews": "node find-ios-reviews.js",
