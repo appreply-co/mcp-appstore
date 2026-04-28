@@ -24,16 +24,10 @@
   "license": "ISC",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "app-store-scraper": "^0.18.0",
-    "aso": "^1.1.1",
     "google-play-scraper": "^9.1.1",
     "zod": "^3.22.4"
   },
   "overrides": {
-    "aso": {
-      "google-play-scraper": "9.2.0",
-      "app-store-scraper": "0.18.0"
-    },
     "form-data": "2.5.5",
     "qs": "6.15.0",
     "tough-cookie": "4.1.4",

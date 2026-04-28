@@ -20,12 +20,11 @@
 
 import { z } from "zod";
 import gplay from "google-play-scraper";
-import appStore from "app-store-scraper";
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import aso from 'aso';
+import { createMemoizedIosAppStoreClient } from './ios-app-store-client.js';
 
 // Create memoized versions of the scrapers
 const memoizedGplay = gplay.memoized({
@@ -33,14 +32,7 @@ const memoizedGplay = gplay.memoized({
   max: 1000 // Maximum cache size
 });
 
-const memoizedAppStore = appStore.memoized({
-  maxAge: 1000 * 60 * 10, // 10 minutes cache
-  max: 1000 // Maximum cache size
-});
-
-// Create ASO clients for both platforms
-const gplayASO = aso('gplay');
-const itunesASO = aso('itunes');
+const memoizedAppStore = createMemoizedIosAppStoreClient();
 
 /**
  * Build a fresh MCP server instance (stdio or one HTTP request/session).
@@ -484,13 +476,13 @@ server.tool(
         
         switch (sort) {
           case "newest":
-            sortType = appStore.sort.RECENT;
+            sortType = "recent";
             break;
           case "helpfulness":
-            sortType = appStore.sort.HELPFUL;
+            sortType = "helpful";
             break;
           default:
-            sortType = appStore.sort.RECENT;
+            sortType = "recent";
         }
         
         // For iOS, we might need to fetch multiple pages
@@ -885,13 +877,13 @@ server.tool(
         
         switch (sort) {
           case "newest":
-            sortType = appStore.sort.RECENT;
+            sortType = "recent";
             break;
           case "helpfulness":
-            sortType = appStore.sort.HELPFUL;
+            sortType = "helpful";
             break;
           default:
-            sortType = appStore.sort.RECENT;
+            sortType = "recent";
         }
         
         // For iOS, we might need to fetch multiple pages
