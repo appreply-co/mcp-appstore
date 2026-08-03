@@ -281,14 +281,26 @@ server.tool(
       let results = [];
       
       if (platform === "android") {
-        // Get search results from Google Play Store
-        results = await memoizedGplay.search({
+        // Get search results from Google Play Store (fullDetail: true crashes in
+        // google-play-scraper when category data is missing from the Play response)
+        const searchResults = await memoizedGplay.search({
           term: keyword,
           num,
           country,
           lang,
-          fullDetail: true
+          fullDetail: false
         });
+
+        const fullDetailsPromises = searchResults.map(app => {
+          try {
+            return memoizedGplay.app({ appId: app.appId, country, lang });
+          } catch (err) {
+            console.error(`Error fetching details for app ${app.appId}:`, err);
+            return app;
+          }
+        });
+
+        results = await Promise.all(fullDetailsPromises);
       } else {
         // Get search results from Apple App Store
         results = await memoizedAppStore.search({
