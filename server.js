@@ -1583,7 +1583,7 @@ server.tool(
           id: app.id.toString(),
           appId: app.appId,
           title: app.title,
-          summary: app.description || "",
+          summary: app.description?.substring(0, 100) || "",
           developer: app.developer,
           developerId: app.developerId,
           icon: app.icon,
