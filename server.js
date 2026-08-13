@@ -272,7 +272,7 @@ server.tool(
   {
     keyword: z.string().describe("The keyword or search term to analyze (e.g., 'meditation app', 'puzzle games')."),
     platform: z.enum(["ios", "android"]).describe("The platform (app store) to analyze ('ios' for Apple App Store, 'android' for Google Play Store)."),
-    num: z.number().optional().default(10).describe("Number of top apps ranking for the keyword to analyze (1-50, default 10). These apps will be fetched with full details to provide comprehensive analysis."),
+    num: z.number().min(1).max(50).optional().default(10).describe("Number of top apps ranking for the keyword to analyze (1-50, default 10). These apps will be fetched with full details to provide comprehensive analysis."),
     country: z.string().length(2).optional().default("us").describe("Two-letter country code for store localization. Default 'us'."),
     lang: z.string().optional().default("en").describe("Language code for results. Default 'en'.")
   },
@@ -291,9 +291,11 @@ server.tool(
           fullDetail: false
         });
 
-        const fullDetailsPromises = searchResults.map(app => {
+        // await inside the try, otherwise the rejection escapes this catch and
+        // one failed app rejects the whole Promise.all instead of degrading.
+        const fullDetailsPromises = searchResults.map(async app => {
           try {
-            return memoizedGplay.app({ appId: app.appId, country, lang });
+            return await memoizedGplay.app({ appId: app.appId, country, lang });
           } catch (err) {
             console.error(`Error fetching details for app ${app.appId}:`, err);
             return app;
@@ -311,9 +313,11 @@ server.tool(
         });
         
         // For Apple, we need to fetch full details for each app
-        const fullDetailsPromises = results.map(app => {
+        // await inside the try, otherwise the rejection escapes this catch and
+        // one failed app rejects the whole Promise.all instead of degrading.
+        const fullDetailsPromises = results.map(async app => {
           try {
-            return memoizedAppStore.app({ id: app.id, country, lang, ratings: true });
+            return await memoizedAppStore.app({ id: app.id, country, lang, ratings: true });
           } catch (err) {
             console.error(`Error fetching details for app ${app.id}:`, err);
             return app; // Return original data if full details fetch fails
@@ -446,7 +450,7 @@ server.tool(
   {
     appId: z.string().describe("The unique identifier for the app (Android package name, iOS numeric ID or bundle ID)."),
     platform: z.enum(["ios", "android"]).describe("The platform of the app ('ios' or 'android')."),
-    num: z.number().optional().default(100).describe("Target number of reviews to analyze (1-1000, default 100). Note: Actual number may be less due to API limitations or available reviews. For iOS, fetching requires multiple requests and is capped at page 10."),
+    num: z.number().min(1).max(1000).optional().default(100).describe("Target number of reviews to analyze (1-1000, default 100). Note: Actual number may be less due to API limitations or available reviews. For iOS, fetching requires multiple requests and is capped at page 10."),
     country: z.string().length(2).optional().default("us").describe("Two-letter country code for reviews localization. Default 'us'."),
     lang: z.string().optional().default("en").describe("Language code for filtering reviews (results may be less accurate if language doesn't match review content). Default 'en'."),
     sort: z.enum(["newest", "rating", "helpfulness"]).optional().default("newest").describe("Sorting order for reviews: 'newest', 'rating' (highest/lowest first, platform dependent), 'helpfulness'. Default 'newest'.")
@@ -497,36 +501,29 @@ server.tool(
             sortType = "recent";
         }
         
-        // For iOS, we might need to fetch multiple pages
-        while (allReviews.length < num && page <= 10) { // App Store only allows 10 pages
+        // Resolve the numeric id ONCE, before paging: doing it inside the loop
+        // repeated the same lookup on every one of the 10 pages.
+        let numericAppId = appId;
+        if (!/^\d+$/.test(appId)) {
           try {
-            // For iOS apps, we need to use id instead of appId
-            let iosParams = {};
-            
-            // Check if the appId is already a numeric ID
-            if (/^\d+$/.test(appId)) {
-              iosParams = {
-                id: appId,
-                page,
-                sort: sortType,
-                country
-              };
-            } else {
-              // First we need to fetch the app to get its numeric ID
-              try {
-                const appDetails = await memoizedAppStore.app({ appId, country });
-                iosParams = {
-                  id: appDetails.id.toString(),
-                  page,
-                  sort: sortType,
-                  country
-                };
-              } catch (appError) {
-                console.error(`Could not fetch app details for ${appId}:`, appError.message);
-                break;
-              }
-            }
-            
+            const appDetails = await memoizedAppStore.app({ appId, country });
+            numericAppId = appDetails.id.toString();
+          } catch (appError) {
+            console.error(`Could not fetch app details for ${appId}:`, appError.message);
+            numericAppId = null;
+          }
+        }
+
+        // For iOS, we might need to fetch multiple pages
+        while (numericAppId && allReviews.length < num && page <= 10) { // App Store only allows 10 pages
+          try {
+            const iosParams = {
+              id: numericAppId,
+              page,
+              sort: sortType,
+              country
+            };
+
             const pageReviews = await memoizedAppStore.reviews(iosParams);
             
             if (!pageReviews || pageReviews.length === 0) {
@@ -544,10 +541,23 @@ server.tool(
         reviews = allReviews.slice(0, num);
       }
       
-      // Very basic sentiment analysis functions
-      function analyzeSentiment(text) {
-        if (!text) return 'neutral';
-        
+      // Sentiment is anchored on the star rating the store already gives us —
+      // it is a far stronger signal than a small keyword lexicon, and without it
+      // any review using none of the listed words collapses to 'neutral',
+      // reporting a 1-star/5-star split as a neutral middle. The lexicon is kept
+      // as the tie-breaker and as the fallback when no rating is present.
+      function analyzeSentiment(text, score) {
+        const rating = typeof score === 'number' && score >= 1 && score <= 5
+          ? score
+          : null;
+
+        if (!text) {
+          if (rating === null) return 'neutral';
+          if (rating >= 4) return 'positive';
+          if (rating <= 2) return 'negative';
+          return 'neutral';
+        }
+
         // Define simple positive and negative word lists
         const positiveWords = [
           'good', 'great', 'excellent', 'awesome', 'amazing', 'love', 'best',
@@ -575,7 +585,22 @@ server.tool(
           if (negativeWords.includes(word)) negativeCount++;
         });
         
-        // Determine sentiment based on counts
+        // With a rating available, the stars decide the band and the wording
+        // only decides how strongly to state it.
+        if (rating !== null) {
+          if (rating >= 4) {
+            return negativeCount > positiveCount ? 'somewhat positive' : 'positive';
+          }
+          if (rating <= 2) {
+            return positiveCount > negativeCount ? 'somewhat negative' : 'negative';
+          }
+          // 3 stars: genuinely mixed, so let the text break the tie.
+          if (positiveCount > negativeCount) return 'somewhat positive';
+          if (negativeCount > positiveCount) return 'somewhat negative';
+          return 'neutral';
+        }
+
+        // No usable rating — fall back to the lexicon alone.
         if (positiveCount > negativeCount * 2) return 'positive';
         if (negativeCount > positiveCount * 2) return 'negative';
         if (positiveCount > negativeCount) return 'somewhat positive';
@@ -616,10 +641,10 @@ server.tool(
       
       // Process all reviews
       const processedReviews = reviews.map(review => {
-        const reviewText = platform === 'android' ? review.text : review.text;
-        const reviewScore = platform === 'android' ? review.score : review.score;
-        
-        const sentiment = analyzeSentiment(reviewText);
+        const reviewText = review.text;
+        const reviewScore = review.score;
+
+        const sentiment = analyzeSentiment(reviewText, reviewScore);
         const keywords = extractKeywords(reviewText);
         
         return {
@@ -661,6 +686,28 @@ server.tool(
         keywordFrequency[keyword] = (keywordFrequency[keyword] || 0) + 1;
       });
       
+      // Tally keywords within one sentiment band only. Ranking by the corpus-wide
+      // count would make the positive and negative lists identical whenever a
+      // common word shows up in reviews of both kinds.
+      function countKeywordsBySentiment(sentiments) {
+        const counts = {};
+        processedReviews
+          .filter(review => sentiments.includes(review.sentiment))
+          .forEach(review => {
+            review.keywords.forEach(keyword => {
+              counts[keyword] = (counts[keyword] || 0) + 1;
+            });
+          });
+
+        return Object.entries(counts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 10)
+          .reduce((obj, [key, value]) => {
+            obj[key] = value;
+            return obj;
+          }, {});
+      }
+
       // Sort keywords by frequency and take top 20
       const topKeywords = Object.entries(keywordFrequency)
         .sort((a, b) => b[1] - a[1])
@@ -670,47 +717,53 @@ server.tool(
           return obj;
         }, {});
       
-      // Identify common themes
-      const commonThemes = [];
-      
-      // Look for bug/crash mentions
-      const bugKeywords = ['bug', 'crash', 'freezes', 'frozen', 'stuck', 'error'];
-      const hasBugTheme = bugKeywords.some(word => 
-        Object.keys(keywordFrequency).some(kw => kw.includes(word))
+      // Identify common themes.
+      // A theme has to be actually recurring: substring matching against the
+      // whole corpus ('free' inside 'freedom') with no threshold reported a
+      // theme whenever one review out of hundreds used a related word. Match on
+      // whole keywords and require a real share of the reviews.
+      const THEME_MIN_REVIEWS = 3;
+      const THEME_MIN_SHARE = 0.05;
+      const themeThreshold = Math.max(
+        THEME_MIN_REVIEWS,
+        Math.ceil(totalReviews * THEME_MIN_SHARE)
       );
-      
-      if (hasBugTheme) {
-        commonThemes.push({
+
+      function countReviewsMentioning(themeWords) {
+        return processedReviews.filter(review =>
+          review.keywords.some(keyword => themeWords.includes(keyword))
+        ).length;
+      }
+
+      const themeDefinitions = [
+        {
+          words: ['bug', 'bugs', 'crash', 'crashes', 'crashing', 'freeze', 'freezes', 'frozen', 'stuck', 'error', 'errors', 'glitch', 'glitches'],
           theme: "Stability Issues",
           description: "Users are reporting crashes, bugs, or freezes"
-        });
-      }
-      
-      // Look for pricing/cost mentions
-      const pricingKeywords = ['price', 'cost', 'expensive', 'cheap', 'free', 'subscription', 'payment'];
-      const hasPricingTheme = pricingKeywords.some(word => 
-        Object.keys(keywordFrequency).some(kw => kw.includes(word))
-      );
-      
-      if (hasPricingTheme) {
-        commonThemes.push({
+        },
+        {
+          words: ['price', 'prices', 'pricing', 'cost', 'costs', 'expensive', 'cheap', 'subscription', 'subscriptions', 'payment', 'payments', 'refund', 'paywall'],
           theme: "Pricing Concerns",
           description: "Users are discussing price or subscription costs"
-        });
-      }
-      
-      // Look for UX/UI feedback
-      const uxKeywords = ['interface', 'design', 'layout', 'ugly', 'beautiful', 'easy', 'difficult', 'confusing'];
-      const hasUxTheme = uxKeywords.some(word => 
-        Object.keys(keywordFrequency).some(kw => kw.includes(word))
-      );
-      
-      if (hasUxTheme) {
-        commonThemes.push({
+        },
+        {
+          words: ['interface', 'design', 'layout', 'ugly', 'beautiful', 'confusing', 'usability', 'intuitive', 'cluttered', 'navigation'],
           theme: "User Experience",
           description: "Users are commenting on the app's design or usability"
-        });
-      }
+        }
+      ];
+
+      const commonThemes = themeDefinitions
+        .map(definition => ({
+          definition,
+          mentions: countReviewsMentioning(definition.words)
+        }))
+        .filter(({ mentions }) => mentions >= themeThreshold)
+        .map(({ definition, mentions }) => ({
+          theme: definition.theme,
+          description: definition.description,
+          reviewsMentioning: mentions
+        }));
       
       // Identify recent issues (from negative reviews in the last 7 days)
       const oneWeekAgo = new Date();
@@ -769,30 +822,8 @@ server.tool(
               ratingDistribution,
               commonThemes,
               recentIssues: topRecentIssues,
-              topPositiveKeywords: Object.entries(keywordFrequency)
-                .filter(([key, value]) => 
-                  processedReviews.some(r => 
-                    r.sentiment === 'positive' && r.keywords.includes(key)
-                  )
-                )
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 10)
-                .reduce((obj, [key, value]) => {
-                  obj[key] = value;
-                  return obj;
-                }, {}),
-              topNegativeKeywords: Object.entries(keywordFrequency)
-                .filter(([key, value]) => 
-                  processedReviews.some(r => 
-                    r.sentiment === 'negative' && r.keywords.includes(key)
-                  )
-                )
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 10)
-                .reduce((obj, [key, value]) => {
-                  obj[key] = value;
-                  return obj;
-                }, {})
+              topPositiveKeywords: countKeywordsBySentiment(['positive', 'somewhat positive']),
+              topNegativeKeywords: countKeywordsBySentiment(['negative', 'somewhat negative'])
             }
           }, null, 2)
         }]
@@ -819,7 +850,7 @@ server.tool(
   {
     appId: z.string().describe("The unique identifier for the app (Android package name, iOS numeric ID or bundle ID)."),
     platform: z.enum(["ios", "android"]).describe("The platform of the app ('ios' or 'android')."),
-    num: z.number().optional().default(100).describe("Number of reviews to fetch (1-1000, default 100). Note: Actual number may be less due to API limitations. For iOS, limited to 10 pages max."),
+    num: z.number().min(1).max(1000).optional().default(100).describe("Number of reviews to fetch (1-1000, default 100). Note: Actual number may be less due to API limitations. For iOS, limited to 10 pages max."),
     country: z.string().length(2).optional().default("us").describe("Two-letter country code for the App Store/Play Store region. Default 'us'."),
     lang: z.string().optional().default("en").describe("Language code for reviews. Default 'en'."),
     sort: z.enum(["newest", "rating", "helpfulness"]).optional().default("newest").describe("Sorting order for reviews: 'newest', 'rating', 'helpfulness'. Default 'newest'.")
@@ -898,36 +929,29 @@ server.tool(
             sortType = "recent";
         }
         
-        // For iOS, we might need to fetch multiple pages
-        while (allReviews.length < num && page <= 10) { // App Store only allows 10 pages
+        // Resolve the numeric id ONCE, before paging: doing it inside the loop
+        // repeated the same lookup on every one of the 10 pages.
+        let numericAppId = appId;
+        if (!/^\d+$/.test(appId)) {
           try {
-            // For iOS apps, we need to use id instead of appId
-            let iosParams = {};
-            
-            // Check if the appId is already a numeric ID
-            if (/^\d+$/.test(appId)) {
-              iosParams = {
-                id: appId,
-                page,
-                sort: sortType,
-                country
-              };
-            } else {
-              // First we need to fetch the app to get its numeric ID
-              try {
-                const appDetails = await memoizedAppStore.app({ appId, country });
-                iosParams = {
-                  id: appDetails.id.toString(),
-                  page,
-                  sort: sortType,
-                  country
-                };
-              } catch (appError) {
-                console.error(`Could not fetch app details for ${appId}:`, appError.message);
-                break;
-              }
-            }
-            
+            const appDetails = await memoizedAppStore.app({ appId, country });
+            numericAppId = appDetails.id.toString();
+          } catch (appError) {
+            console.error(`Could not fetch app details for ${appId}:`, appError.message);
+            numericAppId = null;
+          }
+        }
+
+        // For iOS, we might need to fetch multiple pages
+        while (numericAppId && allReviews.length < num && page <= 10) { // App Store only allows 10 pages
+          try {
+            const iosParams = {
+              id: numericAppId,
+              page,
+              sort: sortType,
+              country
+            };
+
             const pageReviews = await memoizedAppStore.reviews(iosParams);
             
             if (!pageReviews || pageReviews.length === 0) {
@@ -1044,17 +1068,32 @@ server.tool(
         
         // Try to parse IAP items from description if available
         if (appDetails.description && appDetails.offersIAP) {
-          const iapMatches = appDetails.description.match(/(\$[\d\.]+)|([\d\.]+ [A-Z]{3})/g);
-          if (iapMatches && iapMatches.length > 0) {
-            // Simple extraction of potential IAP prices from description
-            const uniquePrices = [...new Set(iapMatches)];
-            pricingDetails.inAppPurchases.items = uniquePrices.map(price => ({
+          // The price pattern captures only the price itself, so the period has
+          // to be read from the surrounding text — testing "$4.99" for the word
+          // "month" can never be true.
+          const pricePattern = /(\$[\d.]+)|([\d.]+ [A-Z]{3})/g;
+          const seenPrices = new Set();
+          const iapItems = [];
+
+          for (const match of appDetails.description.matchAll(pricePattern)) {
+            const price = match[0];
+            if (seenPrices.has(price)) continue;
+            seenPrices.add(price);
+
+            const contextStart = Math.max(0, match.index - 40);
+            const context = appDetails.description
+              .slice(contextStart, match.index + price.length + 40)
+              .toLowerCase();
+
+            iapItems.push({
               type: "unknown", // Can't reliably determine from description
               price,
-              isSubscription: price.toLowerCase().includes("month") || 
-                             price.toLowerCase().includes("year") || 
-                             price.toLowerCase().includes("annual")
-            })).slice(0, 5); // Limit to top 5 potential IAP prices
+              isSubscription: /month|year|annual|week/.test(context)
+            });
+          }
+
+          if (iapItems.length > 0) {
+            pricingDetails.inAppPurchases.items = iapItems.slice(0, 5); // Limit to top 5 potential IAP prices
           }
         }
       } else {
@@ -1081,16 +1120,18 @@ server.tool(
         // Extract in-app purchase information
         // Note: App Store Scraper doesn't provide detailed IAP info directly
         // We can try to extract from description and release notes
-        const hasPaidContent = appDetails.description && 
-          (appDetails.description.includes("in-app purchase") || 
-           appDetails.description.includes("subscription"));
+        // Case-insensitive: Apple's own listings say "In-App Purchases", which a
+        // case-sensitive check would miss, skipping the whole block below.
+        const descriptionLower = (appDetails.description || "").toLowerCase();
+        const hasPaidContent = descriptionLower.includes("in-app purchase") ||
+          descriptionLower.includes("subscription");
         
         if (hasPaidContent) {
           pricingDetails.inAppPurchases.offers = true;
           
           // Try to extract potential subscription information
           const subscriptionMatches = appDetails.description && appDetails.description.match(
-            /(monthly|annual|yearly|week|subscription).{1,30}(\$[\d\.]+|[\d\.]+ [A-Z]{3})/gi
+            /(monthly|annual|yearly|week|subscription).{1,30}(\$[\d.]+|[\d.]+ [A-Z]{3})/gi
           );
           
           if (subscriptionMatches && subscriptionMatches.length > 0) {
@@ -1105,7 +1146,7 @@ server.tool(
               else if (sub.toLowerCase().includes("week")) period = "weekly";
               
               // Extract price with regex
-              const priceMatch = sub.match(/(\$[\d\.]+)|([\d\.]+ [A-Z]{3})/);
+              const priceMatch = sub.match(/(\$[\d.]+)|([\d.]+ [A-Z]{3})/);
               const price = priceMatch ? priceMatch[0] : "Price unknown";
               
               return {
@@ -1117,13 +1158,13 @@ server.tool(
           
           // Try to extract other IAP information
           const iapMatches = appDetails.description && 
-            appDetails.description.match(/in-app purchase.{1,30}(\$[\d\.]+|[\d\.]+ [A-Z]{3})/gi);
+            appDetails.description.match(/in-app purchase.{1,30}(\$[\d.]+|[\d.]+ [A-Z]{3})/gi);
           
           if (iapMatches && iapMatches.length > 0) {
             // Simple extraction of potential IAP prices from description
             const uniqueIaps = [...new Set(iapMatches.map(s => s.trim()))];
             const pricesOnly = uniqueIaps.map(iap => {
-              const priceMatch = iap.match(/(\$[\d\.]+)|([\d\.]+ [A-Z]{3})/);
+              const priceMatch = iap.match(/(\$[\d.]+)|([\d.]+ [A-Z]{3})/);
               return priceMatch ? priceMatch[0] : null;
             }).filter(Boolean);
             
@@ -1237,7 +1278,7 @@ server.tool(
                 appId: app.appId,
                 country,
                 lang
-              }).catch(err => null)
+              }).catch(() => null)
             );
 
             const appDetails = await Promise.all(appDetailsPromises);
@@ -1328,7 +1369,7 @@ server.tool(
                 country,
                 lang,
                 ratings: true
-              }).catch(err => null)
+              }).catch(() => null)
             );
 
             const appDetails = await Promise.all(appDetailsPromises);
@@ -1402,9 +1443,11 @@ server.tool(
         appId,
         platform,
         platformCapabilities: {
-          fullHistoryAvailable: platform === "ios",
-          description: platform === "ios" 
-            ? "Full version history available" 
+          // Neither store exposes full history through the APIs used here; the
+          // iOS branch below restates this after its lookup.
+          fullHistoryAvailable: false,
+          description: platform === "ios"
+            ? "Only latest version available - API limitation (versionHistory function not available)"
             : "Only latest version available due to Google Play Store limitations"
         },
         currentVersion: null,
@@ -1433,7 +1476,6 @@ server.tool(
       } else {
         // For iOS, first handle numeric vs bundle ID
         const isNumericId = /^\d+$/.test(appId);
-        let numericId = appId;
 
         try {
           // Get app details from Apple App Store
@@ -1484,13 +1526,18 @@ server.tool(
         }
       }
 
-      // Add metadata about the response
+      // Add metadata about the response.
+      // Derived from platformCapabilities rather than hard-coded per platform:
+      // iOS is limited to the latest version too, so an empty list here used to
+      // contradict the capabilities block set above.
       const metadata = {
         retrievalDate: new Date().toISOString(),
         totalVersions: versionInfo.history.length,
-        limitations: platform === "android" 
-          ? ["Only latest version available", "Historical data not accessible via Google Play Store API"]
-          : []
+        limitations: versionInfo.platformCapabilities.fullHistoryAvailable
+          ? []
+          : platform === "android"
+            ? ["Only latest version available", "Historical data not accessible via Google Play Store API"]
+            : ["Only latest version available", "Historical data not accessible via the iTunes lookup API"]
       };
 
       return {
@@ -1526,7 +1573,7 @@ server.tool(
     platform: z.enum(["ios", "android"]).describe("The platform of the app ('ios' or 'android')."),
     country: z.string().length(2).optional().default("us").describe("Two-letter country code for the App Store/Play Store region. Default 'us'."),
     lang: z.string().optional().default("en").describe("Language code for the results. Default 'en'."),
-    num: z.number().optional().default(20).describe("Number of similar apps to return (default 20).")
+    num: z.number().min(1).max(50).optional().default(20).describe("Number of similar apps to return (1-50, default 20).")
   },
   async ({ appId, platform, country, lang, num }) => {
     try {
@@ -1661,66 +1708,84 @@ server.tool(
 server.tool(
   "get_keyword_scores",
   {
-    keyword: z.string().describe("The keyword to analyze for App Store Optimization."),
+    keyword: z.string().describe("The keyword to analyze for App Store Optimization. WARNING: this tool returns SYNTHETIC placeholder scores derived from the keyword string alone — they are not measured against either store and carry no market signal. The response is flagged with dataSource:'synthetic'. Do not use it for keyword research."),
     platform: z.enum(["ios", "android"]).describe("The platform to analyze the keyword for ('ios' or 'android')."),
     country: z.string().length(2).optional().default("us").describe("Two-letter country code for localization. Default 'us'.")
   },
   async ({ keyword, platform, country }) => {
     try {
-      // Instead of using the aso package which has compatibility issues,
-      // we'll create a mock response based on the expected structure
-      
+      // NOTE: these figures are SYNTHETIC. The aso package has compatibility
+      // issues, so nothing here is measured against the live stores — the only
+      // real input is the keyword string itself. Every consumer-visible field
+      // is therefore flagged via `dataSource: "synthetic"` below; do not remove
+      // that flag without replacing the generator with real store data.
+
+      // Deterministic pseudo-randomness: the same query must return the same
+      // numbers every time, otherwise repeated calls silently disagree.
+      const seedSource = `${keyword}|${platform}|${country}`;
+      let seedState = 0;
+      for (let i = 0; i < seedSource.length; i++) {
+        seedState = (seedState * 31 + seedSource.charCodeAt(i)) >>> 0;
+      }
+      const rand = () => {
+        // xorshift32 — small, dependency-free, stable across runs
+        seedState ^= seedState << 13; seedState >>>= 0;
+        seedState ^= seedState >> 17;
+        seedState ^= seedState << 5; seedState >>>= 0;
+        return seedState / 4294967296;
+      };
+
       // Generate some semi-random scores based on keyword length and complexity
       const keywordLength = keyword.length;
       const difficultyBase = 5 + (Math.min(keywordLength, 15) / 5);
       const trafficBase = 10 - (Math.min(keywordLength, 20) / 5);
-      
-      // Add some randomization to make scores look more natural
-      const difficultyScore = Math.min(10, Math.max(0, difficultyBase + (Math.random() * 2 - 1))).toFixed(2);
-      const trafficScore = Math.min(10, Math.max(0, trafficBase + (Math.random() * 2 - 1))).toFixed(2);
-      
+
+      // Add some variation to make scores look more natural
+      const difficultyScore = Math.min(10, Math.max(0, difficultyBase + (rand() * 2 - 1))).toFixed(2);
+      const trafficScore = Math.min(10, Math.max(0, trafficBase + (rand() * 2 - 1))).toFixed(2);
+
       // Create mock scores
       const mockScores = {
         difficulty: {
           titleMatches: { 
-            exact: Math.floor(Math.random() * 10), 
-            broad: Math.floor(Math.random() * 5), 
-            partial: Math.floor(Math.random() * 5), 
-            none: Math.floor(Math.random() * 3), 
-            score: (Math.random() * 3 + 7).toFixed(2) 
+            exact: Math.floor(rand() * 10), 
+            broad: Math.floor(rand() * 5), 
+            partial: Math.floor(rand() * 5), 
+            none: Math.floor(rand() * 3), 
+            score: (rand() * 3 + 7).toFixed(2) 
           },
           competitors: { 
-            count: Math.floor(Math.random() * 50) + 10, 
-            score: (Math.random() * 3 + 5).toFixed(2) 
+            count: Math.floor(rand() * 50) + 10, 
+            score: (rand() * 3 + 5).toFixed(2) 
           },
           installs: { 
-            avg: platform === "android" ? Math.floor(Math.random() * 10000000) + 500000 : Math.floor(Math.random() * 500000) + 10000, 
-            score: (Math.random() * 3 + 7).toFixed(2) 
+            avg: platform === "android" ? Math.floor(rand() * 10000000) + 500000 : Math.floor(rand() * 500000) + 10000, 
+            score: (rand() * 3 + 7).toFixed(2) 
           },
           rating: { 
-            avg: (Math.random() * 1 + 4).toFixed(2), 
-            score: (Math.random() * 2 + 7).toFixed(2) 
+            avg: (rand() * 1 + 4).toFixed(2), 
+            score: (rand() * 2 + 7).toFixed(2) 
           },
           age: { 
-            avgDaysSinceUpdated: Math.floor(Math.random() * 100) + 10, 
-            score: (Math.random() * 4 + 4).toFixed(2) 
+            avgDaysSinceUpdated: Math.floor(rand() * 100) + 10, 
+            score: (rand() * 4 + 4).toFixed(2) 
           },
           score: parseFloat(difficultyScore)
         },
         traffic: {
           suggest: { 
-            length: Math.floor(Math.random() * 4) + 1, 
-            index: Math.floor(Math.random() * 5) + 1, 
-            score: (Math.random() * 3 + 6).toFixed(2) 
+            length: Math.floor(rand() * 4) + 1, 
+            index: Math.floor(rand() * 5) + 1, 
+            score: (rand() * 3 + 6).toFixed(2) 
           },
           ranked: { 
-            count: Math.floor(Math.random() * 8) + 2, 
-            avgRank: Math.floor(Math.random() * 80) + 10, 
-            score: (Math.random() * 3 + 5).toFixed(2) 
+            count: Math.floor(rand() * 8) + 2, 
+            avgRank: Math.floor(rand() * 80) + 10, 
+            score: (rand() * 3 + 5).toFixed(2) 
           },
           installs: { 
-            avg: platform === "android" ? Math.floor(Math.random() * 10000000) + 500000 : Math.floor(Math.random() * 500000) + 10000, 
-            score: (Math.random() * 3 + 7).toFixed(2) 
+            avg: platform === "android" ? Math.floor(rand() * 10000000) + 500000 : Math.floor(rand() * 500000) + 10000, 
+            score: (rand() * 3 + 7).toFixed(2) 
           },
           length: { 
             length: keywordLength, 
@@ -1735,6 +1800,8 @@ server.tool(
         keyword,
         platform,
         country,
+        dataSource: "synthetic",
+        warning: "These scores are NOT measured from the App Store or Google Play. They are generated from the keyword string alone and carry no market signal. Do not use them for keyword decisions or report them as research.",
         scores: {
           difficulty: {
             score: mockScores.difficulty.score,
