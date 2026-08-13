@@ -37,11 +37,14 @@ app.post('/mcp', async (req, res) => {
       sessionIdGenerator: undefined,
     });
     await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    // Register cleanup BEFORE handling the request: a non-streaming response can
+    // finish inside handleRequest, and a 'close' listener attached afterwards
+    // would never fire, leaking the per-request server and transport.
     res.on('close', () => {
       transport.close().catch(() => {});
       server.close();
     });
+    await transport.handleRequest(req, res, req.body);
   } catch (error) {
     console.error('MCP HTTP error:', error);
     jsonRpcError(res, 500, 'Internal server error');
