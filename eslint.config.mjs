@@ -1,19 +1,22 @@
-// @ts-check
+import js from '@eslint/js';
+import globals from 'globals';
 
-import eslint from '@eslint/js';
-import tseslint from 'typescript-eslint';
-
-export default tseslint.config(
-    eslint.configs.recommended,
-    ...tseslint.configs.recommended,
+export default [
+    js.configs.recommended,
     {
+        files: ['**/*.js', '**/*.mjs'],
+        languageOptions: {
+            ecmaVersion: 2022,
+            sourceType: 'module',
+            globals: {
+                ...globals.node,
+            },
+        },
         linterOptions: {
             reportUnusedDisableDirectives: false,
         },
         rules: {
-            "@typescript-eslint/no-unused-vars": ["error",
-                { "argsIgnorePattern": "^_" }
-            ]
-        }
-    }
-);
+            'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+        },
+    },
+];

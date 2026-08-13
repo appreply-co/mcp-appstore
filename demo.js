@@ -136,7 +136,7 @@ async function main() {
     });
     
     console.log("\nRecent issues mentioned:");
-    analysis.recentIssues.forEach((issue, index) => {
+    analysis.recentIssues.forEach((issue) => {
       console.log(`- ${issue}`);
     });
     

@@ -78,7 +78,7 @@ async function runTests() {
       console.log('\nTest 1: Verify server configuration');
       
       // Test the search_app tool which will confirm the server is working
-      const searchResult = await client.callTool({
+      await client.callTool({
         name: "search_app",
         arguments: {
           term: "test",
