@@ -12,7 +12,6 @@
  * - fetch_reviews
  * - get_similar_apps
  * - get_android_categories
- * - get_keyword_scores
  */
 
 import assert from 'assert';
@@ -109,8 +108,7 @@ async function runTests() {
         "get_developer_info",
         "get_version_history",
         "get_similar_apps",
-        "get_android_categories",
-        "get_keyword_scores"
+        "get_android_categories"
       ];
       
       // Check each tool exists
@@ -256,11 +254,19 @@ async function runTests() {
       // Parse the result
       const iosKeywordData = JSON.parse(iosKeywordResult.content[0].text);
       
-      assert(iosKeywordData.keyword === "fitness tracker", "Keyword should be 'fitness tracker'");
-      assert(iosKeywordData.platform === "ios", "Platform should be 'ios'");
-      assert(iosKeywordData.topApps, "Top apps should be present");
-      assert(Array.isArray(iosKeywordData.topApps), "Top apps should be an array");
-      assert(iosKeywordData.brandPresence, "Brand presence should be present");
+      assert(iosKeywordData.query.keyword === "fitness tracker", "Keyword should be 'fitness tracker'");
+      assert(iosKeywordData.query.platform === "ios", "Platform should be 'ios'");
+      assert(iosKeywordData.observed.topApps, "Top apps should be present");
+      assert(Array.isArray(iosKeywordData.observed.topApps), "Top apps should be an array");
+      assert(iosKeywordData.calculated.developerConcentration, "Developer concentration should be present");
+      assert(iosKeywordData.unavailable.searchVolume === null, "searchVolume must be null, never estimated");
+      assert(iosKeywordData.unavailable.keywordDifficulty === null, "keywordDifficulty must be null, never estimated");
+      // A missing rating must be excluded from the sample, never counted as 0.
+      assert(
+        iosKeywordData.calculated.rating.sampleSize + iosKeywordData.calculated.rating.missing
+          === iosKeywordData.observed.appsReturned,
+        "Rating sampleSize + missing should equal appsReturned"
+      );
       
       // Test Android 
       await wait(1000);
@@ -277,11 +283,24 @@ async function runTests() {
       // Parse the result
       const androidKeywordData = JSON.parse(androidKeywordResult.content[0].text);
       
-      assert(androidKeywordData.keyword === "fitness tracker", "Keyword should be 'fitness tracker'");
-      assert(androidKeywordData.platform === "android", "Platform should be 'android'");
-      assert(androidKeywordData.topApps, "Top apps should be present");
-      assert(Array.isArray(androidKeywordData.topApps), "Top apps should be an array");
-      assert(androidKeywordData.brandPresence, "Brand presence should be present");
+      assert(androidKeywordData.query.keyword === "fitness tracker", "Keyword should be 'fitness tracker'");
+      assert(androidKeywordData.query.platform === "android", "Platform should be 'android'");
+      assert(androidKeywordData.observed.topApps, "Top apps should be present");
+      assert(Array.isArray(androidKeywordData.observed.topApps), "Top apps should be an array");
+      assert(androidKeywordData.calculated.developerConcentration, "Developer concentration should be present");
+      assert(androidKeywordData.unavailable.searchVolume === null, "searchVolume must be null, never estimated");
+      assert(androidKeywordData.unavailable.keywordDifficulty === null, "keywordDifficulty must be null, never estimated");
+      // Every app must declare whether its detail fetch succeeded.
+      assert(
+        androidKeywordData.observed.topApps.every(
+          (a) => a.dataCompleteness === "full" || a.dataCompleteness === "partial"
+        ),
+        "Every app should declare dataCompleteness"
+      );
+      assert(
+        Array.isArray(androidKeywordData.observed.detailFetchFailures),
+        "detailFetchFailures should be an array"
+      );
       
       console.log('✅ analyze_top_keywords tool test passed for both platforms');
     } catch (error) {
@@ -669,60 +688,6 @@ async function runTests() {
       failedTests.push('get_android_categories');
     }
     
-    // Test 13: Test get_keyword_scores tool
-    try {
-      console.log('\nTest 13: Test get_keyword_scores tool');
-      await wait(1000);
-      
-      // Test keyword scores for Android
-      console.log('  Getting keyword scores for "music streaming" on Android...');
-      const androidKeywordResult = await client.callTool({
-        name: "get_keyword_scores",
-        arguments: {
-          keyword: "music streaming",
-          platform: "android"
-        }
-      });
-      
-      // Parse the result
-      const androidKeywordData = JSON.parse(androidKeywordResult.content[0].text);
-      
-      assert(androidKeywordData.keyword === "music streaming", "Keyword should be 'music streaming'");
-      assert(androidKeywordData.platform === "android", "Platform should be 'android'");
-      assert(androidKeywordData.scores, "Scores should be present");
-      assert(typeof androidKeywordData.scores.difficulty.score === 'number', "Difficulty score should be a number");
-      assert(typeof androidKeywordData.scores.traffic.score === 'number', "Traffic score should be a number");
-      assert(androidKeywordData.scores.difficulty.interpretation, "Difficulty interpretation should be present");
-      assert(androidKeywordData.scores.traffic.interpretation, "Traffic interpretation should be present");
-      
-      // Test keyword scores for iOS
-      await wait(1000);
-      console.log('  Getting keyword scores for "music streaming" on iOS...');
-      const iosKeywordResult = await client.callTool({
-        name: "get_keyword_scores",
-        arguments: {
-          keyword: "music streaming",
-          platform: "ios"
-        }
-      });
-      
-      // Parse the result
-      const iosKeywordData = JSON.parse(iosKeywordResult.content[0].text);
-      
-      assert(iosKeywordData.keyword === "music streaming", "Keyword should be 'music streaming'");
-      assert(iosKeywordData.platform === "ios", "Platform should be 'ios'");
-      assert(iosKeywordData.scores, "Scores should be present");
-      assert(typeof iosKeywordData.scores.difficulty.score === 'number', "Difficulty score should be a number");
-      assert(typeof iosKeywordData.scores.traffic.score === 'number', "Traffic score should be a number");
-      assert(iosKeywordData.scores.difficulty.interpretation, "Difficulty interpretation should be present");
-      assert(iosKeywordData.scores.traffic.interpretation, "Traffic interpretation should be present");
-      
-      console.log('✅ get_keyword_scores tool test passed for both platforms');
-    } catch (error) {
-      console.error('❌ get_keyword_scores test failed:', error.message);
-      failedTests.push('get_keyword_scores');
-    }
-    
   } catch (error) {
     console.error('Error during test execution:', error);
   } finally {
@@ -771,8 +736,6 @@ function getMinimalArgs(toolName) {
       return { developerId: ANDROID_DEV_ID, platform: 'android' };
     case 'get_android_categories':
       return {};
-    case 'get_keyword_scores':
-      return { keyword: 'music streaming', platform: 'android' };
     default:
       return { platform: 'android' };
   }

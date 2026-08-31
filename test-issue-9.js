@@ -44,14 +44,19 @@ async function runExample(client, { label, arguments: args }) {
   }
 
   console.log('Result: SUCCESS');
-  console.log(`Keyword: ${data.keyword}`);
-  console.log(`Platform: ${data.platform}`);
-  console.log(`Top apps (${data.topApps.length}):`);
-  data.topApps.forEach((app, i) => {
-    console.log(`  ${i + 1}. ${app.title} (${app.developer}) — score ${app.score ?? 'n/a'}`);
+  console.log(`Keyword: ${data.query.keyword}`);
+  console.log(`Platform: ${data.query.platform} (${data.query.country}/${data.query.lang})`);
+  console.log(`Top apps (${data.observed.topApps.length}):`);
+  data.observed.topApps.forEach((app, i) => {
+    console.log(
+      `  ${i + 1}. ${app.title} (${app.developer}) — score ${app.score ?? 'n/a'} [${app.dataCompleteness}]`
+    );
   });
-  console.log('Brand presence:', JSON.stringify(data.brandPresence, null, 2));
-  console.log('Metrics:', JSON.stringify(data.metrics, null, 2));
+  if (data.observed.detailFetchFailures.length > 0) {
+    console.log('Detail fetch failures:', JSON.stringify(data.observed.detailFetchFailures, null, 2));
+  }
+  console.log('Calculated:', JSON.stringify(data.calculated, null, 2));
+  console.log('Unavailable:', JSON.stringify(data.unavailable, null, 2));
   return true;
 }
 

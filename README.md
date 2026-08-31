@@ -164,14 +164,33 @@ const result = await client.callTool({
 
 ### 3. analyze_top_keywords
 
-Analyze top keywords for apps including brand analysis and competition metrics.
+Analyze the apps ranking for a keyword and report the competitive landscape.
+
+The response separates data into three blocks so a consumer can always tell where
+a number came from:
+
+| Block | Meaning |
+|---|---|
+| `observed` | Read straight from the store. No arithmetic applied. |
+| `calculated` | Derived by this server from `observed`. Every figure carries the `sampleSize` it was computed over. |
+| `unavailable` | Not published by the store and not covered by any external source wired into this server. Always `null` — never estimated. |
+
+**Data integrity guarantees:**
+- A missing value is `null`, never `0`, and never silently omitted.
+- Averages are computed only over apps that actually have the value. An app
+  without a rating is excluded from the sample, not counted as a rating of 0.
+- If an app's detail fetch fails, the app is still returned (from the shallow
+  search record) but marked `"dataCompleteness": "partial"` and listed in
+  `observed.detailFetchFailures`. One failing app never fails the whole query.
+- **No search volume or keyword difficulty is invented.** Neither store publishes
+  them, so both are returned as `null` with an explanation.
 
 **Parameters:**
 - `keyword`: The keyword to analyze
 - `platform`: The platform to analyze (`ios` or `android`)
 - `country` (optional): Two-letter country code (default: "us")
 - `lang` (optional): Language code for the results (default: "en")
-- `num` (optional): Number of apps to analyze (default: 10, max: 50)
+- `num` (optional): Number of apps to analyze (integer, 1-50, default: 10)
 
 **Example usage:**
 ```javascript
@@ -188,41 +207,96 @@ const result = await client.callTool({
 **Response:**
 ```json
 {
-  "keyword": "fitness tracker",
-  "platform": "ios",
-  "topApps": [
-    {
-      "appId": "com.fitbit.FitbitMobile",
-      "title": "Fitbit: Health & Fitness",
-      "developer": "Fitbit, Inc.",
-      "developerId": "347935733",
-      "score": 4.5,
-      "ratings": 238456,
-      "free": true,
-      "price": 0,
-      "currency": "USD",
-      "category": "Health & Fitness",
-      "url": "https://apps.apple.com/us/app/fitbit/id...",
-      "icon": "https://is1-ssl.mzstatic.com/..."
-    },
-    // Additional apps...
-  ],
-  "brandPresence": {
-    "topBrands": ["Fitbit, Inc.", "Garmin"],
-    "brandDominance": 0.45,
-    "competitionLevel": "Medium - mix of major brands and independents"
+  "query": {
+    "keyword": "fitness tracker",
+    "platform": "ios",
+    "country": "us",
+    "lang": "en",
+    "requestedNum": 10
   },
-  "metrics": {
-    "totalApps": 10,
-    "averageRating": 4.2,
-    "paidAppsPercentage": 30.0,
+  "observed": {
+    "appsRequested": 10,
+    "appsReturned": 10,
+    "appsWithFullDetail": 9,
+    "appsWithPartialDetail": 1,
+    "detailFetchFailures": [
+      { "appId": "com.example.flaky", "reason": "Apple API request failed (503)" }
+    ],
+    "topApps": [
+      {
+        "appId": "com.fitbit.FitbitMobile",
+        "storeId": 462638897,
+        "title": "Fitbit: Health & Fitness",
+        "developer": "Fitbit, Inc.",
+        "developerId": "347935733",
+        "free": true,
+        "price": 0,
+        "currency": "USD",
+        "url": "https://apps.apple.com/us/app/fitbit/id...",
+        "icon": "https://is1-ssl.mzstatic.com/...",
+        "dataCompleteness": "full",
+        "installs": null,
+        "minInstalls": null,
+        "score": 4.5,
+        "ratingCount": 238456,
+        "category": "Health & Fitness"
+      }
+      // Additional apps...
+    ]
+  },
+  "calculated": {
+    "rating": {
+      "mean": 4.42, "median": 4.5, "min": 3.9, "max": 4.8,
+      "sum": 39.8, "sampleSize": 9, "missing": 1
+    },
+    "ratingCount": {
+      "mean": 51203.4, "median": 12947, "min": 774, "max": 238456,
+      "sum": 460831, "sampleSize": 9, "missing": 1
+    },
+    "minInstalls": {
+      "mean": null, "median": null, "min": null, "max": null,
+      "sum": null, "sampleSize": 0, "missing": 10,
+      "note": "Apple publishes no install counts; this sample is always empty for iOS."
+    },
+    "pricing": {
+      "freeApps": 9, "paidApps": 0, "unknown": 1, "paidPercentage": 0
+    },
+    "developerConcentration": {
+      "distinctDevelopers": 8,
+      "sampleSize": 10,
+      "topDeveloper": { "developer": "Fitbit, Inc.", "apps": 2, "share": 0.2 },
+      "appsPerDeveloper": { "Fitbit, Inc.": 2, "Garmin": 2, "...": 1 },
+      "herfindahlIndex": 0.14,
+      "note": "Raw concentration of the result set. This is a measured distribution, not a difficulty or competitiveness rating."
+    },
     "categoryDistribution": {
-      "Health & Fitness": 8,
-      "Lifestyle": 2
+      "counts": { "Health & Fitness": 8, "Lifestyle": 1 },
+      "unknown": 1
+    }
+  },
+  "unavailable": {
+    "searchVolume": null,
+    "keywordDifficulty": null,
+    "exactInstallCount": null,
+    "impressions": null,
+    "conversionRate": null,
+    "notes": {
+      "searchVolume": "Google Play and the App Store do not publish search volume, and this server has no external ASO data source connected yet. No estimate is produced.",
+      "keywordDifficulty": "Neither store publishes a keyword difficulty metric, and this server has no external ASO data source connected yet. No heuristic score is produced; use `calculated` to judge competition yourself.",
+      "exactInstallCount": "Google Play publishes only bucketed ranges; Apple publishes nothing.",
+      "impressions": "Owner-only, via Play Console / App Store Connect.",
+      "conversionRate": "Owner-only, via Play Console / App Store Connect."
     }
   }
 }
 ```
+
+> **Migration note:** this response shape replaces the previous top-level
+> `keyword` / `platform` / `topApps` fields and the `brandPresence` and `metrics`
+> objects. `brandPresence.competitionLevel`, `brandPresence.topBrands` and
+> `brandPresence.brandDominance` were removed: they presented a subjective
+> difficulty label as if it were store data, and the label's thresholds were
+> inverted. Use `calculated.developerConcentration` for the underlying numbers.
 
 ### 4. analyze_reviews
 
@@ -705,22 +779,32 @@ const result = await client.callTool({
 
 **Note:** The specific category list returned may vary depending on the Google Play Store API version and region. In the current implementation, only the "APPLICATION" category is typically returned, despite the Google Play Store having many more categories visible on the web interface. This is a limitation of the underlying API.
 
-### 11. get_keyword_scores
+### 11. get_search_suggestions
 
-Analyzes a keyword for App Store Optimization (ASO) and returns difficulty and traffic scores to evaluate its potential.
+Returns Google Play's own search autocomplete suggestions for a seed term. The suggestions are whatever the store returns, passed through verbatim — no scoring, no ranking, and no terms generated by this server.
+
+> **Replaces `get_keyword_scores`.** That tool fabricated difficulty and traffic
+> scores with `Math.random()` and returned them as if they were ASO metrics. It was
+> removed rather than repaired: neither store publishes keyword difficulty or search
+> volume, so there was nothing real to compute those scores from. For what the stores
+> *do* expose, see `analyze_top_keywords` — and its `unavailable` block for what they
+> do not.
+
+**Android only.** The App Store has no equivalent public autocomplete endpoint, so there is no `platform` parameter; the response always reports `"platform": "android"`.
 
 **Parameters:**
-- `keyword`: The keyword to analyze for App Store Optimization.
-- `platform`: The platform to analyze the keyword for (`ios` or `android`).
-- `country` (optional): Two-letter country code for localization. Default 'us'.
+- `term`: The seed term to get suggestions for (e.g. `"meditation"`, `"photo editor"`)
+- `country` (optional): Two-letter country code for store localization (default: `"us"`)
+- `lang` (optional): Language code for results (default: `"en"`)
 
 **Example usage:**
 ```javascript
 const result = await client.callTool({
-  name: "get_keyword_scores",
+  name: "get_search_suggestions",
   arguments: {
-    keyword: "music streaming",
-    platform: "android"
+    term: "tarot",
+    country: "es",
+    lang: "es"
   }
 });
 ```
@@ -728,70 +812,23 @@ const result = await client.callTool({
 **Response:**
 ```json
 {
-  "keyword": "music streaming",
+  "term": "tarot",
   "platform": "android",
-  "country": "us",
-  "scores": {
-    "difficulty": {
-      "score": 8.56,
-      "components": {
-        "titleMatches": { 
-          "exact": 8, 
-          "broad": 1, 
-          "partial": 1, 
-          "none": 0, 
-          "score": 9.3 
-        },
-        "competitors": { 
-          "count": 42, 
-          "score": 7.35 
-        },
-        "installs": { 
-          "avg": 12500000, 
-          "score": 9.9 
-        },
-        "rating": { 
-          "avg": 4.5, 
-          "score": 9.0 
-        },
-        "age": { 
-          "avgDaysSinceUpdated": 48.2, 
-          "score": 5.8 
-        }
-      },
-      "interpretation": "Difficult to rank for"
-    },
-    "traffic": {
-      "score": 7.82,
-      "components": {
-        "suggest": { 
-          "length": 2, 
-          "index": 1, 
-          "score": 8.5 
-        },
-        "ranked": { 
-          "count": 7, 
-          "avgRank": 12.3, 
-          "score": 7.9 
-        },
-        "installs": { 
-          "avg": 12500000, 
-          "score": 9.9 
-        },
-        "length": { 
-          "length": 15, 
-          "score": 5.0 
-        }
-      },
-      "interpretation": "High search traffic"
-    }
-  }
+  "country": "es",
+  "lang": "es",
+  "count": 5,
+  "suggestions": [
+    "tarot",
+    "tarot gratis",
+    "tarot gratis en español mas fiable",
+    "tarot gratis en español",
+    "tarot ia"
+  ],
+  "source": "Google Play search autocomplete (google-play-scraper suggest)"
 }
 ```
 
-Each score has a human-readable interpretation to help understand its significance.
-
-**Note:** The current implementation simulates ASO scores based on keyword length and other heuristics rather than using real-time data. This approach was chosen due to compatibility issues between the aso package and current versions of the Google Play and App Store scrapers. The scores follow the same structure and interpretation guidelines as actual ASO metrics but should be considered approximations.
+An empty `suggestions` array means Google Play suggested nothing for that term in that country/language. The response carries an explicit `note` saying so, so an empty list is never mistaken for a failed call — and it is never padded from another source.
 
 ### 12. suggest_keywords_by_category
 

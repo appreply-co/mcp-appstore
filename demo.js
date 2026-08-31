@@ -96,17 +96,33 @@ async function main() {
     
     const keywordData = JSON.parse(keywordResult.content[0].text);
     
-    console.log(`\nAnalysis for keyword '${keywordData.keyword}' on ${keywordData.platform}:`);
+    console.log(`\nAnalysis for keyword '${keywordData.query.keyword}' on ${keywordData.query.platform} (${keywordData.query.country}/${keywordData.query.lang}):`);
+    console.log(
+      `Apps returned: ${keywordData.observed.appsReturned} ` +
+      `(full detail: ${keywordData.observed.appsWithFullDetail}, ` +
+      `partial: ${keywordData.observed.appsWithPartialDetail})`
+    );
+
     console.log("\nTop apps:");
-    keywordData.topApps.forEach((app, index) => {
-      console.log(`${index + 1}. ${app.title} by ${app.developer} (Installs: ${app.installs || 'Unknown'})`);
+    keywordData.observed.topApps.forEach((app, index) => {
+      console.log(
+        `${index + 1}. ${app.title} by ${app.developer} ` +
+        `(Installs: ${app.installs ?? 'Unknown'}) [${app.dataCompleteness}]`
+      );
     });
-    
-    console.log("\nBrand presence:");
-    for (const [brand, presence] of Object.entries(keywordData.brandPresence)) {
-      console.log(`- ${brand}: ${presence.toFixed(2)}%`);
+
+    const { rating, developerConcentration } = keywordData.calculated;
+    console.log("\nCalculated (derived by this server, not store data):");
+    console.log(`- Mean rating: ${rating.mean ?? 'n/a'} over ${rating.sampleSize} app(s), ${rating.missing} without a rating`);
+    console.log(`- Distinct developers: ${developerConcentration.distinctDevelopers}`);
+    for (const [dev, count] of Object.entries(developerConcentration.appsPerDeveloper)) {
+      console.log(`  - ${dev}: ${count} app(s)`);
     }
-    
+
+    console.log("\nNot available from the store:");
+    console.log(`- searchVolume: ${keywordData.unavailable.searchVolume}`);
+    console.log(`- keywordDifficulty: ${keywordData.unavailable.keywordDifficulty}`);
+
     // Demo 4: Analyze reviews
     console.log("\n\n💬 DEMO 4: Review Analysis");
     console.log("---------------------------");

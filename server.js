@@ -34,6 +34,67 @@ const memoizedGplay = gplay.memoized({
 
 const memoizedAppStore = createMemoizedIosAppStoreClient();
 
+/* ------------------------------------------------------------------ *
+ * Helpers for analyze_top_keywords
+ * ------------------------------------------------------------------ */
+
+// Play throttles bursts; hydrating 50 apps at once is what makes individual
+// detail fetches fail. Keep the fan-out small.
+const DETAIL_FETCH_CONCURRENCY = 5;
+
+export const round2 = (n) => Math.round(n * 100) / 100;
+
+/**
+ * Run an async mapper over `items` with bounded concurrency.
+ * Every item is isolated: a rejection is captured and returned as
+ * { ok: false, error }, never propagated. One failing app can therefore
+ * never fail the whole keyword analysis.
+ */
+export async function mapSettledWithConcurrency(items, limit, mapper) {
+  const out = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      while (cursor < items.length) {
+        const index = cursor++;
+        try {
+          out[index] = { ok: true, value: await mapper(items[index], index) };
+        } catch (error) {
+          out[index] = { ok: false, error };
+        }
+      }
+    }
+  );
+  await Promise.all(workers);
+  return out;
+}
+
+/**
+ * Summarize the values that actually exist. A missing value is excluded from
+ * both numerator and denominator - it is never coerced to 0. Always reports
+ * the sampleSize the figures were computed over.
+ */
+export function summarizeNumbers(values) {
+  const sample = values.filter((v) => typeof v === "number" && Number.isFinite(v));
+  if (sample.length === 0) {
+    return { mean: null, median: null, min: null, max: null, sum: null, sampleSize: 0 };
+  }
+  const sorted = [...sample].sort((a, b) => a - b);
+  const sum = sorted.reduce((a, b) => a + b, 0);
+  const mid = Math.floor(sorted.length / 2);
+  const median =
+    sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  return {
+    mean: round2(sum / sorted.length),
+    median: round2(median),
+    min: sorted[0],
+    max: sorted[sorted.length - 1],
+    sum,
+    sampleSize: sorted.length
+  };
+}
+
 /**
  * Build a fresh MCP server instance (stdio or one HTTP request/session).
  */
@@ -272,167 +333,214 @@ server.tool(
   {
     keyword: z.string().describe("The keyword or search term to analyze (e.g., 'meditation app', 'puzzle games')."),
     platform: z.enum(["ios", "android"]).describe("The platform (app store) to analyze ('ios' for Apple App Store, 'android' for Google Play Store)."),
-    num: z.number().optional().default(10).describe("Number of top apps ranking for the keyword to analyze (1-50, default 10). These apps will be fetched with full details to provide comprehensive analysis."),
+    num: z.number().int().min(1).max(50).optional().default(10).describe("Number of top apps ranking for the keyword to analyze (1-50, default 10). These apps will be fetched with full details to provide comprehensive analysis."),
     country: z.string().length(2).optional().default("us").describe("Two-letter country code for store localization. Default 'us'."),
     lang: z.string().optional().default("en").describe("Language code for results. Default 'en'.")
   },
   async ({ keyword, platform, num, country, lang }) => {
     try {
-      let results = [];
-      
+      // ---- 1. Search. A failure here is genuinely fatal for the query. ----
+      let searchResults;
       if (platform === "android") {
-        // Get search results from Google Play Store (fullDetail: true crashes in
-        // google-play-scraper when category data is missing from the Play response)
-        const searchResults = await memoizedGplay.search({
+        // fullDetail:true crashes google-play-scraper when Play omits category
+        // data, so we search shallow and hydrate each app separately below.
+        searchResults = await memoizedGplay.search({
           term: keyword,
           num,
           country,
           lang,
           fullDetail: false
         });
-
-        const fullDetailsPromises = searchResults.map(app => {
-          try {
-            return memoizedGplay.app({ appId: app.appId, country, lang });
-          } catch (err) {
-            console.error(`Error fetching details for app ${app.appId}:`, err);
-            return app;
-          }
-        });
-
-        results = await Promise.all(fullDetailsPromises);
       } else {
-        // Get search results from Apple App Store
-        results = await memoizedAppStore.search({
-          term: keyword,
-          num,
-          country,
-          lang
-        });
-        
-        // For Apple, we need to fetch full details for each app
-        const fullDetailsPromises = results.map(app => {
-          try {
-            return memoizedAppStore.app({ id: app.id, country, lang, ratings: true });
-          } catch (err) {
-            console.error(`Error fetching details for app ${app.id}:`, err);
-            return app; // Return original data if full details fetch fails
-          }
-        });
-        
-        // Wait for all detail requests to complete
-        results = await Promise.all(fullDetailsPromises);
+        searchResults = await memoizedAppStore.search({ term: keyword, num, country, lang });
       }
-      
-      // Normalize and extract key metrics
-      const normalizedApps = results.map(app => {
+      searchResults = (searchResults || []).slice(0, num);
+
+      // ---- 2. Hydrate details. Each app is isolated from the others. ----
+      const settled = await mapSettledWithConcurrency(
+        searchResults,
+        DETAIL_FETCH_CONCURRENCY,
+        (app) => platform === "android"
+          ? memoizedGplay.app({ appId: app.appId, country, lang })
+          : memoizedAppStore.app({ id: app.id, country, lang, ratings: true })
+      );
+
+      // A failed detail fetch falls back to the shallow search record, but the
+      // fallback is now reported instead of silently masquerading as full data.
+      const detailFetchFailures = [];
+      const hydrated = settled.map((res, i) => {
+        if (res.ok) return { app: res.value, complete: true };
+        const fallback = searchResults[i] || {};
+        const id = fallback.appId ?? fallback.id ?? null;
+        detailFetchFailures.push({
+          appId: id,
+          reason: res.error?.message ?? String(res.error)
+        });
+        console.error(`[analyze_top_keywords] detail fetch failed for ${id}:`, res.error);
+        return { app: fallback, complete: false };
+      });
+
+      // ---- 3. Normalize. Absent data is null, never 0, never omitted. ----
+      const topApps = hydrated.map(({ app, complete }) => {
+        const base = {
+          appId: app.appId ?? null,
+          title: app.title ?? null,
+          developer: app.developer ?? null,
+          developerId: app.developerId ?? null,
+          free: typeof app.free === "boolean" ? app.free : null,
+          price: typeof app.price === "number" ? app.price : null,
+          currency: app.currency ?? null,
+          url: app.url ?? null,
+          icon: app.icon ?? null,
+          dataCompleteness: complete ? "full" : "partial"
+        };
+
         if (platform === "android") {
           return {
-            appId: app.appId,
-            title: app.title,
-            developer: app.developer,
-            developerId: app.developerId,
-            installs: app.installs,
-            minInstalls: app.minInstalls,
-            score: app.score,
-            ratings: app.ratings,
-            free: app.free,
-            price: app.price,
-            currency: app.currency,
-            category: app.genre,
-            url: app.url,
-            icon: app.icon
-          };
-        } else {
-          return {
-            appId: app.appId,
-            title: app.title,
-            developer: app.developer,
-            developerId: app.developerId,
-            score: app.score,
-            ratings: app.ratings || 0,
-            free: app.free,
-            price: app.price,
-            currency: app.currency,
-            category: app.primaryGenre,
-            url: app.url,
-            icon: app.icon
+            ...base,
+            installs: app.installs ?? null,
+            minInstalls: typeof app.minInstalls === "number" ? app.minInstalls : null,
+            score: typeof app.score === "number" ? app.score : null,
+            ratingCount: typeof app.ratings === "number" ? app.ratings : null,
+            category: app.genre ?? null
           };
         }
+
+        // iOS. mapApp() exposes the rating count as `reviews` and the category
+        // as `genre` - reading `ratings`/`primaryGenre` yielded 0/undefined for
+        // every iOS app.
+        const iosRatingCount = typeof app.reviews === "number" ? app.reviews : null;
+        return {
+          ...base,
+          storeId: app.id ?? null,
+          installs: null, // Apple publishes no install data at all.
+          minInstalls: null,
+          // mapApp() coerces a missing average to 0; a 0 with no ratings behind
+          // it is absence of data, not a rating of zero.
+          score: typeof app.score === "number" && app.score > 0 && iosRatingCount
+            ? app.score
+            : null,
+          ratingCount: iosRatingCount,
+          category: app.primaryGenre ?? app.genre ?? null
+        };
       });
-      
-      // Calculate brand presence metrics
+
+      // ---- 4. Aggregate, each figure over its own real sample. ----
+      const appsReturned = topApps.length;
+      const appsWithFullDetail = topApps.filter((a) => a.dataCompleteness === "full").length;
+
+      const rating = summarizeNumbers(topApps.map((a) => a.score));
+      const ratingCount = summarizeNumbers(topApps.map((a) => a.ratingCount));
+      const minInstalls = summarizeNumbers(topApps.map((a) => a.minInstalls));
+
+      const freeApps = topApps.filter((a) => a.free === true).length;
+      const paidApps = topApps.filter((a) => a.free === false).length;
+      const pricingKnown = freeApps + paidApps;
+
+      // Apps with an unknown developer are excluded from the denominator rather
+      // than collapsed into an "undefined" bucket.
       const developerCounts = {};
-      normalizedApps.forEach(app => {
-        developerCounts[app.developer] = (developerCounts[app.developer] || 0) + 1;
+      topApps.forEach((a) => {
+        if (!a.developer) return;
+        developerCounts[a.developer] = (developerCounts[a.developer] || 0) + 1;
       });
-      
-      // Sort developers by number of apps in results
-      const sortedDevelopers = Object.entries(developerCounts)
-        .sort((a, b) => b[1] - a[1])
-        .map(entry => entry[0]);
-      
-      // Calculate average ratings and other metrics
-      const totalApps = normalizedApps.length;
-      const avgRating = normalizedApps.reduce((sum, app) => sum + (app.score || 0), 0) / totalApps;
-      const paidApps = normalizedApps.filter(app => !app.free);
-      const paidPercentage = (paidApps.length / totalApps) * 100;
-      
-      // Check for big brand presence (simplified algorithm)
-      // Here we're assuming the top 2 developers with most apps are "big brands"
-      const topBrands = sortedDevelopers.slice(0, 2);
-      const topBrandAppsCount = topBrands.reduce((count, brand) => 
-        count + developerCounts[brand], 0);
-      const brandDominance = topBrandAppsCount / totalApps;
-      
-      // Determine competition level
-      let competitionLevel;
-      if (brandDominance > 0.7) {
-        competitionLevel = "Low - dominated by major brands";
-      } else if (brandDominance > 0.4) {
-        competitionLevel = "Medium - mix of major brands and independents";
-      } else {
-        competitionLevel = "High - diverse set of developers";
-      }
-      
-      // Create category distribution
-      const categoryDistribution = {};
-      normalizedApps.forEach(app => {
-        const category = app.category;
-        if (category) {
-          categoryDistribution[category] = (categoryDistribution[category] || 0) + 1;
+      const developerEntries = Object.entries(developerCounts).sort((a, b) => b[1] - a[1]);
+      const developerSample = developerEntries.reduce((s, [, c]) => s + c, 0);
+
+      const categoryCounts = {};
+      let categoryUnknown = 0;
+      topApps.forEach((a) => {
+        if (!a.category) {
+          categoryUnknown++;
+          return;
         }
+        categoryCounts[a.category] = (categoryCounts[a.category] || 0) + 1;
       });
-      
+
       return {
-        content: [{ 
-          type: "text", 
+        content: [{
+          type: "text",
           text: JSON.stringify({
-            keyword,
-            platform,
-            topApps: normalizedApps,
-            brandPresence: {
-              topBrands,
-              brandDominance: parseFloat(brandDominance.toFixed(2)),
-              competitionLevel
+            query: { keyword, platform, country, lang, requestedNum: num },
+
+            // (1) Read straight from the store. No arithmetic applied.
+            observed: {
+              appsRequested: num,
+              appsReturned,
+              appsWithFullDetail,
+              appsWithPartialDetail: appsReturned - appsWithFullDetail,
+              detailFetchFailures,
+              topApps
             },
-            metrics: {
-              totalApps,
-              averageRating: parseFloat(avgRating.toFixed(2)),
-              paidAppsPercentage: parseFloat(paidPercentage.toFixed(2)),
-              categoryDistribution
+
+            // (2) Derived by this server from `observed`. Every figure carries
+            // the sample size it was computed over, so a gap can never be
+            // misread as a zero.
+            calculated: {
+              rating: { ...rating, missing: appsReturned - rating.sampleSize },
+              ratingCount: { ...ratingCount, missing: appsReturned - ratingCount.sampleSize },
+              minInstalls: {
+                ...minInstalls,
+                missing: appsReturned - minInstalls.sampleSize,
+                note: platform === "ios"
+                  ? "Apple publishes no install counts; this sample is always empty for iOS."
+                  : "Google Play publishes bucketed floors ('100,000+'), so these are lower bounds."
+              },
+              pricing: {
+                freeApps,
+                paidApps,
+                unknown: appsReturned - pricingKnown,
+                paidPercentage: pricingKnown ? round2((paidApps / pricingKnown) * 100) : null
+              },
+              developerConcentration: {
+                distinctDevelopers: developerEntries.length,
+                sampleSize: developerSample,
+                topDeveloper: developerEntries[0]
+                  ? {
+                      developer: developerEntries[0][0],
+                      apps: developerEntries[0][1],
+                      share: round2(developerEntries[0][1] / developerSample)
+                    }
+                  : null,
+                appsPerDeveloper: developerCounts,
+                herfindahlIndex: developerSample
+                  ? round2(developerEntries.reduce(
+                      (s, [, c]) => s + Math.pow(c / developerSample, 2), 0))
+                  : null,
+                note: "Raw concentration of the result set. This is a measured distribution, not a difficulty or competitiveness rating."
+              },
+              categoryDistribution: { counts: categoryCounts, unknown: categoryUnknown }
+            },
+
+            // (3) Not published by either store, and not yet covered by any
+            // external source wired into this server. Never estimated.
+            unavailable: {
+              searchVolume: null,
+              keywordDifficulty: null,
+              exactInstallCount: null,
+              impressions: null,
+              conversionRate: null,
+              notes: {
+                searchVolume: "Google Play and the App Store do not publish search volume, and this server has no external ASO data source connected yet. No estimate is produced.",
+                keywordDifficulty: "Neither store publishes a keyword difficulty metric, and this server has no external ASO data source connected yet. No heuristic score is produced; use `calculated` to judge competition yourself.",
+                exactInstallCount: "Google Play publishes only bucketed ranges; Apple publishes nothing.",
+                impressions: "Owner-only, via Play Console / App Store Connect.",
+                conversionRate: "Owner-only, via Play Console / App Store Connect."
+              }
             }
           }, null, 2)
         }]
       };
     } catch (error) {
       return {
-        content: [{ 
-          type: "text", 
+        content: [{
+          type: "text",
           text: JSON.stringify({
             error: error.message,
             keyword,
-            platform
+            platform,
+            country,
+            lang
           }, null, 2)
         }],
         isError: true
@@ -1657,123 +1765,49 @@ server.tool(
   }
 );
 
-// Tool to get keyword scores for ASO (App Store Optimization)
+// Tool to get real search autocomplete suggestions from Google Play
 server.tool(
-  "get_keyword_scores",
+  "get_search_suggestions",
   {
-    keyword: z.string().describe("The keyword to analyze for App Store Optimization."),
-    platform: z.enum(["ios", "android"]).describe("The platform to analyze the keyword for ('ios' or 'android')."),
-    country: z.string().length(2).optional().default("us").describe("Two-letter country code for localization. Default 'us'.")
+    term: z.string().describe("The seed term to get Google Play search autocomplete suggestions for (e.g., 'meditation', 'photo editor')."),
+    country: z.string().length(2).optional().default("us").describe("Two-letter country code for store localization (e.g., 'us', 'es', 'mx'). Default 'us'."),
+    lang: z.string().optional().default("en").describe("Language code for results (e.g., 'en', 'es'). Default 'en'.")
   },
-  async ({ keyword, platform, country }) => {
+  async ({ term, country, lang }) => {
     try {
-      // Instead of using the aso package which has compatibility issues,
-      // we'll create a mock response based on the expected structure
-      
-      // Generate some semi-random scores based on keyword length and complexity
-      const keywordLength = keyword.length;
-      const difficultyBase = 5 + (Math.min(keywordLength, 15) / 5);
-      const trafficBase = 10 - (Math.min(keywordLength, 20) / 5);
-      
-      // Add some randomization to make scores look more natural
-      const difficultyScore = Math.min(10, Math.max(0, difficultyBase + (Math.random() * 2 - 1))).toFixed(2);
-      const trafficScore = Math.min(10, Math.max(0, trafficBase + (Math.random() * 2 - 1))).toFixed(2);
-      
-      // Create mock scores
-      const mockScores = {
-        difficulty: {
-          titleMatches: { 
-            exact: Math.floor(Math.random() * 10), 
-            broad: Math.floor(Math.random() * 5), 
-            partial: Math.floor(Math.random() * 5), 
-            none: Math.floor(Math.random() * 3), 
-            score: (Math.random() * 3 + 7).toFixed(2) 
-          },
-          competitors: { 
-            count: Math.floor(Math.random() * 50) + 10, 
-            score: (Math.random() * 3 + 5).toFixed(2) 
-          },
-          installs: { 
-            avg: platform === "android" ? Math.floor(Math.random() * 10000000) + 500000 : Math.floor(Math.random() * 500000) + 10000, 
-            score: (Math.random() * 3 + 7).toFixed(2) 
-          },
-          rating: { 
-            avg: (Math.random() * 1 + 4).toFixed(2), 
-            score: (Math.random() * 2 + 7).toFixed(2) 
-          },
-          age: { 
-            avgDaysSinceUpdated: Math.floor(Math.random() * 100) + 10, 
-            score: (Math.random() * 4 + 4).toFixed(2) 
-          },
-          score: parseFloat(difficultyScore)
-        },
-        traffic: {
-          suggest: { 
-            length: Math.floor(Math.random() * 4) + 1, 
-            index: Math.floor(Math.random() * 5) + 1, 
-            score: (Math.random() * 3 + 6).toFixed(2) 
-          },
-          ranked: { 
-            count: Math.floor(Math.random() * 8) + 2, 
-            avgRank: Math.floor(Math.random() * 80) + 10, 
-            score: (Math.random() * 3 + 5).toFixed(2) 
-          },
-          installs: { 
-            avg: platform === "android" ? Math.floor(Math.random() * 10000000) + 500000 : Math.floor(Math.random() * 500000) + 10000, 
-            score: (Math.random() * 3 + 7).toFixed(2) 
-          },
-          length: { 
-            length: keywordLength, 
-            score: (10 - Math.min(keywordLength, 20) / 4).toFixed(2) 
-          },
-          score: parseFloat(trafficScore)
-        }
-      };
-      
-      // Add additional metadata
-      const response = {
-        keyword,
-        platform,
-        country,
-        scores: {
-          difficulty: {
-            score: mockScores.difficulty.score,
-            components: {
-              titleMatches: mockScores.difficulty.titleMatches,
-              competitors: mockScores.difficulty.competitors,
-              installs: mockScores.difficulty.installs,
-              rating: mockScores.difficulty.rating,
-              age: mockScores.difficulty.age
-            },
-            interpretation: interpretDifficultyScore(mockScores.difficulty.score)
-          },
-          traffic: {
-            score: mockScores.traffic.score,
-            components: {
-              suggest: mockScores.traffic.suggest,
-              ranked: mockScores.traffic.ranked,
-              installs: mockScores.traffic.installs,
-              length: mockScores.traffic.length
-            },
-            interpretation: interpretTrafficScore(mockScores.traffic.score)
-          }
-        }
-      };
-      
+      // gplay.suggest() returns Google Play's own autocomplete list for the term.
+      // Results are passed through verbatim: no scoring, no ranking, no generated terms.
+      const raw = await memoizedGplay.suggest({ term, country, lang });
+
+      const suggestions = (Array.isArray(raw) ? raw : [])
+        .map(entry => (typeof entry === "string" ? entry : entry?.suggestion))
+        .filter(entry => typeof entry === "string" && entry.length > 0);
+
       return {
-        content: [{ 
-          type: "text", 
-          text: JSON.stringify(response, null, 2)
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            term,
+            platform: "android",
+            country,
+            lang,
+            count: suggestions.length,
+            suggestions,
+            source: "Google Play search autocomplete (google-play-scraper suggest)",
+            note: suggestions.length === 0
+              ? "Google Play returned no autocomplete suggestions for this term in this country/language. The list is empty because the store suggested nothing; it has not been completed from any other source."
+              : undefined
+          }, null, 2)
         }]
       };
     } catch (error) {
       return {
-        content: [{ 
-          type: "text", 
+        content: [{
+          type: "text",
           text: JSON.stringify({
             error: error.message,
-            keyword,
-            platform
+            term,
+            platform: "android"
           }, null, 2)
         }],
         isError: true
@@ -1783,23 +1817,6 @@ server.tool(
 );
 
 return server;
-}
-
-// Helper functions for keyword score interpretation
-function interpretDifficultyScore(score) {
-  if (score < 3) return "Very easy to rank for";
-  if (score < 5) return "Easy to rank for";
-  if (score < 7) return "Moderately difficult to rank for";
-  if (score < 9) return "Difficult to rank for";
-  return "Very difficult to rank for";
-}
-
-function interpretTrafficScore(score) {
-  if (score < 3) return "Very low search traffic";
-  if (score < 5) return "Low search traffic";
-  if (score < 7) return "Moderate search traffic";
-  if (score < 9) return "High search traffic";
-  return "Very high search traffic";
 }
 
 // Helper function to determine app monetization model
