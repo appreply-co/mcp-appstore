@@ -22,15 +22,113 @@ import { z } from "zod";
 import gplay from "google-play-scraper";
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createMemoizedIosAppStoreClient } from './ios-app-store-client.js';
+
+/* ------------------------------------------------------------------ *
+ * google-play-scraper extractor hardening
+ * ------------------------------------------------------------------ */
+
+const nodeRequire = createRequire(import.meta.url);
+
+// Carries the appId of the in-flight gplay.app() call so a field-level
+// extractor failure can name the app it belongs to. AsyncLocalStorage keeps
+// this correct while several apps are hydrated concurrently.
+const gplayAppContext = new AsyncLocalStorage();
+
+const EXTRACTOR_PATCH_FLAG = Symbol.for("mcp-appstore.extractorPatched");
+
+function reportExtractorFieldFailure(field, error) {
+  const appId = gplayAppContext.getStore()?.appId;
+  console.error(
+    `[gplay-patch] mapping field "${field}" failed for ${appId ?? "unknown app"}: ${error?.message ?? error}`
+  );
+}
+
+/**
+ * google-play-scraper maps ~40 fields out of a single parsed Play response, and
+ * its extractor (lib/utils/scriptData.js) applies every mapping with no
+ * isolation. Several mapping functions guard `=== null` but receive `undefined`
+ * when Play omits a field - extractCategories, reached via MAPPINGS.categories
+ * in lib/app.js, is the one that bites us - so one missing index throws and
+ * discards the entire app record even though the HTTP request and the JSON
+ * parse both succeeded.
+ *
+ * This wraps each field's `fun` in its own try/catch. A field that throws now
+ * yields `undefined` - exactly what an array-spec mapping already does when its
+ * path is missing - and every other field survives untouched.
+ *
+ * Deliberately narrow: only per-field mapping errors are caught. request() and
+ * JSON.parse run outside the extractor (lib/app.js), so network failures and
+ * malformed responses still reject exactly as before.
+ *
+ * Idempotent, and a no-op if the internal module ever moves or changes shape -
+ * in which case we keep today's behaviour (a visible failure) rather than
+ * breaking startup.
+ */
+function applyGplayExtractorPatch() {
+  let scriptData;
+  try {
+    scriptData = nodeRequire("google-play-scraper/lib/utils/scriptData");
+  } catch (error) {
+    console.error(`[gplay-patch] not applied: ${error.message}`);
+    return { applied: false, reason: error.message };
+  }
+
+  if (!scriptData || typeof scriptData.extractor !== "function") {
+    console.error("[gplay-patch] not applied: scriptData.extractor is not a function");
+    return { applied: false, reason: "extractor missing or not a function" };
+  }
+  if (scriptData[EXTRACTOR_PATCH_FLAG]) {
+    return { applied: false, reason: "already patched" };
+  }
+
+  const originalExtractor = scriptData.extractor;
+
+  scriptData.extractor = function patchedExtractor(mappings) {
+    const isolated = {};
+    for (const [field, spec] of Object.entries(mappings)) {
+      // Array specs resolve through R.path, which already returns undefined
+      // rather than throwing when the path is missing. Leave them alone.
+      if (!spec || Array.isArray(spec) || typeof spec.fun !== "function") {
+        isolated[field] = spec;
+        continue;
+      }
+      isolated[field] = {
+        ...spec,
+        fun: (...args) => {
+          try {
+            return spec.fun(...args);
+          } catch (error) {
+            reportExtractorFieldFailure(field, error);
+            return undefined;
+          }
+        }
+      };
+    }
+    return originalExtractor(isolated);
+  };
+
+  scriptData[EXTRACTOR_PATCH_FLAG] = true;
+  return { applied: true };
+}
+
+applyGplayExtractorPatch();
 
 // Create memoized versions of the scrapers
 const memoizedGplay = gplay.memoized({
   maxAge: 1000 * 60 * 10, // 10 minutes cache
   max: 1000 // Maximum cache size
 });
+
+// Wrap the memoized app() so the extractor patch can name the app a failing
+// field belongs to. Memoization still happens inside; this only adds context.
+const memoizedGplayApp = memoizedGplay.app;
+memoizedGplay.app = (opts) =>
+  gplayAppContext.run({ appId: opts?.appId ?? null }, () => memoizedGplayApp(opts));
 
 const memoizedAppStore = createMemoizedIosAppStoreClient();
 
@@ -1530,7 +1628,12 @@ server.tool(
         // For Android, we can only get the current version
         versionInfo.currentVersion = {
           versionNumber: appDetails.version,
-          releaseDate: new Date(appDetails.updated).toISOString(),
+          // Play omits the update timestamp for some apps; new Date(undefined)
+          // is an Invalid Date and toISOString() throws on it. Mirror the guard
+          // the iOS branch already has.
+          releaseDate: appDetails.updated
+            ? new Date(appDetails.updated).toISOString()
+            : null,
           changelog: appDetails.recentChanges || "No changelog provided",
           isCurrentVersion: true
         };
