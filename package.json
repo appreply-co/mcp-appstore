@@ -39,7 +39,16 @@
     "tough-cookie": "4.1.4",
     "xml2js": "0.6.2",
     "flatted": "3.4.2",
-    "tmp": "0.2.4"
+    "tmp": "0.2.4",
+    "@modelcontextprotocol/sdk": {
+      "ip-address": "10.3.1"
+    },
+    "express-rate-limit": {
+      "ip-address": "10.3.1"
+    },
+    "ip-address": {
+      "ip-address": "10.3.1"
+    }
   },
   "engines": {
     "node": ">=18"
