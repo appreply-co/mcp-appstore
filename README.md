@@ -4,7 +4,7 @@ This is an MCP (Model Context Protocol) server that provides tools for searching
 
 Perfect for ASO (App Store Search Optimization).
 
-Built by [AppReply.co](https://appreply.co). For more information, see our [MCP documentation](https://appreply.co/docs/mcp-server/overview).
+Built by [AppReply.co](https://appreply.co).
 
 ## Installation
 
