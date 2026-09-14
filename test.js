@@ -78,7 +78,7 @@ async function runTests() {
       console.log('\nTest 1: Verify server configuration');
       
       // Test the search_app tool which will confirm the server is working
-      const searchResult = await client.callTool({
+      await client.callTool({
         name: "search_app",
         arguments: {
           term: "test",
@@ -694,6 +694,8 @@ async function runTests() {
       assert(typeof androidKeywordData.scores.traffic.score === 'number', "Traffic score should be a number");
       assert(androidKeywordData.scores.difficulty.interpretation, "Difficulty interpretation should be present");
       assert(androidKeywordData.scores.traffic.interpretation, "Traffic interpretation should be present");
+      assert(androidKeywordData.dataSource === "synthetic", "Keyword scores must be labelled synthetic");
+      assert(androidKeywordData.warning, "Synthetic keyword scores must include a warning");
       
       // Test keyword scores for iOS
       await wait(1000);
@@ -716,6 +718,7 @@ async function runTests() {
       assert(typeof iosKeywordData.scores.traffic.score === 'number', "Traffic score should be a number");
       assert(iosKeywordData.scores.difficulty.interpretation, "Difficulty interpretation should be present");
       assert(iosKeywordData.scores.traffic.interpretation, "Traffic interpretation should be present");
+      assert(iosKeywordData.dataSource === "synthetic", "Keyword scores must be labelled synthetic");
       
       console.log('✅ get_keyword_scores tool test passed for both platforms');
     } catch (error) {

@@ -403,7 +403,7 @@ Returns a list of similar or related apps ("Customers also bought" for iOS, "Sim
 - `platform`: The platform of the app (`ios` or `android`)
 - `country` (optional): Two-letter country code (default: "us")
 - `lang` (optional): Language code for the results (default: "en")
-- `num` (optional): Number of similar apps to return (default: 20)
+- `num` (optional): Number of similar apps to return (1-50, default: 20). iOS summaries are truncated to 100 characters (same convention as `get_app_details`); use `get_app_details` for the full description.
 
 **Example usage:**
 ```javascript
@@ -611,8 +611,8 @@ const result = await client.callTool({
   "appId": "com.spotify.music",
   "platform": "ios",
   "platformCapabilities": {
-    "fullHistoryAvailable": true,
-    "description": "Full version history available"
+    "fullHistoryAvailable": false,
+    "description": "Only latest version available - API limitation (versionHistory function not available)"
   },
   "currentVersion": {
     "versionNumber": "8.8.40",
@@ -626,19 +626,15 @@ const result = await client.callTool({
       "releaseDate": "2024-03-28T14:52:32Z",
       "changelog": "Bug fixes and improvements",
       "isCurrentVersion": true
-    },
-    {
-      "versionNumber": "8.8.38",
-      "releaseDate": "2024-03-14T10:23:15Z",
-      "changelog": "New features and performance improvements",
-      "isCurrentVersion": false
     }
-    // Additional version history...
   ],
   "metadata": {
     "retrievalDate": "2024-03-31T12:34:56Z",
-    "totalVersions": 50,
-    "limitations": []
+    "totalVersions": 1,
+    "limitations": [
+      "Only latest version available",
+      "Historical data not accessible via the iTunes lookup API"
+    ]
   }
 }
 ```
@@ -707,12 +703,12 @@ const result = await client.callTool({
 
 ### 11. get_keyword_scores
 
-Analyzes a keyword for App Store Optimization (ASO) and returns difficulty and traffic scores to evaluate its potential.
+Returns **synthetic** placeholder difficulty and traffic scores derived from the keyword string alone. They are **not** measured against the App Store or Google Play (`dataSource: "synthetic"`). Do not use this tool for keyword research until a real ASO integration exists.
 
 **Parameters:**
-- `keyword`: The keyword to analyze for App Store Optimization.
+- `keyword`: The keyword to analyze. The tool description warns callers that scores are synthetic.
 - `platform`: The platform to analyze the keyword for (`ios` or `android`).
-- `country` (optional): Two-letter country code for localization. Default 'us'.
+- `country` (optional): Two-letter country code for localization. Default 'us'. Same keyword + platform + country always returns the same placeholder numbers.
 
 **Example usage:**
 ```javascript
@@ -731,6 +727,8 @@ const result = await client.callTool({
   "keyword": "music streaming",
   "platform": "android",
   "country": "us",
+  "dataSource": "synthetic",
+  "warning": "These scores are NOT measured from the App Store or Google Play. They are generated from the keyword string alone and carry no market signal. Do not use them for keyword decisions or report them as research.",
   "scores": {
     "difficulty": {
       "score": 8.56,
@@ -791,7 +789,7 @@ const result = await client.callTool({
 
 Each score has a human-readable interpretation to help understand its significance.
 
-**Note:** The current implementation simulates ASO scores based on keyword length and other heuristics rather than using real-time data. This approach was chosen due to compatibility issues between the aso package and current versions of the Google Play and App Store scrapers. The scores follow the same structure and interpretation guidelines as actual ASO metrics but should be considered approximations.
+**Note:** Scores are generated from the keyword string (length plus a seeded PRNG). They are not store measurements. The response includes `dataSource: "synthetic"` and a `warning` field so models do not present them as research.
 
 ### 12. suggest_keywords_by_category
 
