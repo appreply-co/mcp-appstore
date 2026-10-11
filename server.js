@@ -66,7 +66,7 @@ server.tool(
   {
     term: z.string().describe("The search term to look up (e.g., 'panda', 'spotify', 'photo editor'). This is required."),
     platform: z.enum(["ios", "android"]).describe("The platform to search on ('ios' for Apple App Store, 'android' for Google Play Store)."),
-    num: z.number().min(1).max(250).optional().default(10).describe("Number of results to return (1-250, default 10). For Android max is 250, for iOS typically defaults to 50."),
+    num: z.number().min(1).max(250).optional().default(10).describe("Number of results to return (1-250, default 10). Android returns up to 250; iOS returns at most 200 because Apple's search API caps results there."),
     country: z.string().length(2).optional().default("us").describe("Two-letter country code for the App Store/Play Store region (e.g., 'us', 'de', 'gb'). Affects ranking and availability. Default 'us'.")
   },
   async ({ term, platform, num, country }) => {

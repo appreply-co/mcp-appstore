@@ -14,6 +14,8 @@ function mapApp(result) {
     description: result.description,
     genre: result.primaryGenreName,
     genreId: result.primaryGenreId,
+    primaryGenre: result.primaryGenreName,
+    genres: result.genres || [],
     icon: result.artworkUrl512 || result.artworkUrl100 || result.artworkUrl60,
     score: toNumber(result.averageUserRating),
     ratings: toNumber(result.userRatingCount),
@@ -27,13 +29,14 @@ function mapApp(result) {
     developer: result.artistName,
     developerId: result.artistId,
     developerUrl: result.artistViewUrl,
+    developerWebsite: result.sellerUrl,
     sellerName: result.sellerName,
     releaseNotes: result.releaseNotes,
     minimumOsVersion: result.minimumOsVersion,
-    contentAdvisoryRating: result.contentAdvisoryRating,
+    contentRating: result.contentAdvisoryRating,
     supportedDevices: result.supportedDevices || [],
-    screenshotUrls: result.screenshotUrls || [],
-    ipadScreenshotUrls: result.ipadScreenshotUrls || [],
+    screenshots: result.screenshotUrls || [],
+    ipadScreenshots: result.ipadScreenshotUrls || [],
     languageCodesISO2A: result.languageCodesISO2A || [],
     size: toNumber(result.fileSizeBytes),
   };
@@ -47,14 +50,17 @@ async function fetchJson(url) {
   return response.json();
 }
 
+const ITUNES_MAX_LIMIT = 200;
+
 async function search({ term, num = 10, country = 'us' }) {
   const url = new URL(`${ITUNES_BASE_URL}/search`);
   url.searchParams.set('term', term);
   url.searchParams.set('entity', 'software');
-  url.searchParams.set('limit', String(num));
+  // Apple returns one result fewer than `limit` asks for, so request one extra.
+  url.searchParams.set('limit', String(Math.min(num + 1, ITUNES_MAX_LIMIT)));
   url.searchParams.set('country', country);
   const data = await fetchJson(url.toString());
-  return (data.results || []).map(mapApp);
+  return (data.results || []).map(mapApp).slice(0, num);
 }
 
 async function app({ id, appId, country = 'us' }) {
