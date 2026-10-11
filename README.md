@@ -692,14 +692,20 @@ const result = await client.callTool({
 ```json
 {
   "platform": "android",
-  "count": 1,
+  "count": 54,
   "categories": [
-    "APPLICATION"
-  ]
+    "APPLICATION",
+    "ANDROID_WEAR",
+    "ART_AND_DESIGN",
+    // ...
+    "GAME_WORD",
+    "FAMILY"
+  ],
+  "source": "google-play-scraper built-in category IDs (not fetched live from Google Play)"
 }
 ```
 
-**Note:** The specific category list returned may vary depending on the Google Play Store API version and region. In the current implementation, only the "APPLICATION" category is typically returned, despite the Google Play Store having many more categories visible on the web interface. This is a limitation of the underlying API.
+**Note:** The list comes from `google-play-scraper`'s built-in category IDs, not from a live request. Scraping the categories from Google Play currently returns only `"APPLICATION"`, so the built-in list is used instead. It may lag behind categories Google adds or removes.
 
 ### 11. get_keyword_scores
 

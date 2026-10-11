@@ -34,6 +34,14 @@ const memoizedGplay = gplay.memoized({
 
 const memoizedAppStore = createMemoizedIosAppStoreClient();
 
+// Mean star rating over apps that have one. Unrated apps are excluded rather than
+// counted as 0; returns null when no app is rated.
+function averageRatingOf(apps) {
+  const scores = apps.map(app => app.score).filter(score => typeof score === "number" && score > 0);
+  if (scores.length === 0) return null;
+  return parseFloat((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(2));
+}
+
 /**
  * Build a fresh MCP server instance (stdio or one HTTP request/session).
  */
@@ -224,8 +232,6 @@ server.tool(
           score: appDetails.score,
           scoreText: appDetails.score?.toString(),
           ratings: appDetails.ratings,
-          reviews: appDetails.reviews,
-          histogram: appDetails.histogram,
           price: appDetails.price,
           free: appDetails.free,
           currency: appDetails.currency,
@@ -354,7 +360,7 @@ server.tool(
             developer: app.developer,
             developerId: app.developerId,
             score: app.score,
-            ratings: app.ratings || 0,
+            ratings: app.ratings,
             free: app.free,
             price: app.price,
             currency: app.currency,
@@ -378,7 +384,7 @@ server.tool(
       
       // Calculate average ratings and other metrics
       const totalApps = normalizedApps.length;
-      const avgRating = normalizedApps.reduce((sum, app) => sum + (app.score || 0), 0) / totalApps;
+      const avgRating = averageRatingOf(normalizedApps);
       const paidApps = normalizedApps.filter(app => !app.free);
       const paidPercentage = (paidApps.length / totalApps) * 100;
       
@@ -422,7 +428,7 @@ server.tool(
             },
             metrics: {
               totalApps,
-              averageRating: parseFloat(avgRating.toFixed(2)),
+              averageRating: avgRating,
               paidAppsPercentage: parseFloat(paidPercentage.toFixed(2)),
               categoryDistribution
             }
@@ -1211,7 +1217,7 @@ server.tool(
     platform: z.enum(["ios", "android"]).describe("The platform associated with the developer ('ios' or 'android')."),
     country: z.string().length(2).optional().default("us").describe("Two-letter country code for store localization. Default 'us'."),
     lang: z.string().optional().default("en").describe("Language code for results. Default 'en'."),
-    includeApps: z.boolean().optional().default(true).describe("Whether to fetch and include details of the developer's apps in the response (up to 100 for Android, potentially more for iOS). Setting to false returns only developer metadata.")
+    includeApps: z.boolean().optional().default(true).describe("Whether to fetch and include details of the developer's apps in the response (up to 100 for Android, potentially more for iOS). Setting to false returns only developer metadata, and the aggregate metrics (installs, ratings) are null because they are computed from the app details.")
   },
   async ({ developerId, platform, country, lang, includeApps }) => {
     try {
@@ -1226,9 +1232,9 @@ server.tool(
         supportContact: null,
         totalApps: 0,
         metrics: {
-          totalInstalls: 0,
-          averageRating: 0,
-          totalRatings: 0
+          totalInstalls: null,
+          averageRating: null,
+          totalRatings: null
         },
         apps: []
       };
@@ -1258,16 +1264,10 @@ server.tool(
             email: firstApp.developerEmail || null,
             address: firstApp.developerAddress || null,
             privacyPolicy: firstApp.privacyPolicy || null,
-            totalApps: apps.length,
-            metrics: {
-              totalInstalls: 0,
-              averageRating: 0,
-              totalRatings: 0
-            }
+            totalApps: apps.length
           };
 
           // Calculate metrics across all apps
-          let totalRating = 0;
           let totalRatings = 0;
           let totalInstalls = 0;
 
@@ -1285,14 +1285,13 @@ server.tool(
             const validAppDetails = appDetails.filter(app => app !== null);
 
             validAppDetails.forEach(app => {
-              if (app.score) totalRating += app.score;
               if (app.ratings) totalRatings += app.ratings;
               if (app.minInstalls) totalInstalls += app.minInstalls;
             });
 
             developerInfo.metrics = {
               totalInstalls,
-              averageRating: totalRating / validAppDetails.length,
+              averageRating: averageRatingOf(validAppDetails),
               totalRatings
             };
 
@@ -1353,12 +1352,7 @@ server.tool(
             ...developerInfo,
             name: firstApp.developer || developerId,
             website: firstApp.developerWebsite || null,
-            totalApps: apps.length,
-            metrics: {
-              totalInstalls: null, // App Store doesn't provide install numbers
-              averageRating: 0,
-              totalRatings: 0
-            }
+            totalApps: apps.length
           };
 
           if (includeApps) {
@@ -1376,17 +1370,15 @@ server.tool(
             const validAppDetails = appDetails.filter(app => app !== null);
 
             // Calculate metrics
-            let totalRating = 0;
             let totalRatings = 0;
 
             validAppDetails.forEach(app => {
-              if (app.score) totalRating += app.score;
               if (app.ratings) totalRatings += app.ratings;
             });
 
             developerInfo.metrics = {
               totalInstalls: null, // Not available in App Store
-              averageRating: totalRating / validAppDetails.length,
+              averageRating: averageRatingOf(validAppDetails),
               totalRatings
             };
 
@@ -1673,8 +1665,9 @@ server.tool(
   {},
   async () => {
     try {
-      // Retrieve all categories from Google Play Store
-      const categories = await gplay.categories();
+      // gplay.categories() scrapes the Play Store page and currently returns only
+      // ["APPLICATION"], so serve the library's category IDs instead and say so.
+      const categories = Object.values(gplay.category);
       
       return {
         content: [{ 
@@ -1682,7 +1675,8 @@ server.tool(
           text: JSON.stringify({
             platform: "android",
             count: categories.length,
-            categories
+            categories,
+            source: "google-play-scraper built-in category IDs (not fetched live from Google Play)"
           }, null, 2)
         }]
       };

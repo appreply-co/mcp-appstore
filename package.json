@@ -35,22 +35,14 @@
   },
   "overrides": {
     "form-data": "2.5.5",
-    "qs": "6.15.3",
+    "qs": "6.16.0",
     "tough-cookie": "4.1.4",
     "xml2js": "0.6.2",
     "flatted": "3.4.2",
     "tmp": "0.2.4",
-    "@modelcontextprotocol/sdk": {
-      "ip-address": "10.3.1"
-    },
-    "express-rate-limit": {
-      "ip-address": "10.3.1"
-    },
-    "ip-address": {
-      "ip-address": "10.3.1"
-    }
+    "ip-address": "10.7.3"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.18.1"
   }
 }
